@@ -51,9 +51,10 @@ def carregar_dados(origem):
 
 def identificar_coluna(colunas, possiveis_nomes):
     for nome in possiveis_nomes:
+        nome_norm = normalizar_texto(nome).lower()
         for col in colunas:
             col_norm = normalizar_texto(col).lower()
-            if nome.lower() in col_norm:
+            if (nome_norm in col_norm) or (nome.lower() in str(col).lower()):
                 return col
     return colunas[0] if len(colunas) > 0 else None
 
@@ -335,7 +336,7 @@ if file_novos and file_reativados and file_fortpel and file_adm:
         with c_f4:
             col_f_val = st.selectbox("Valor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["valor", "total", "faturado", "preco", "somadevl"])))
         with c_f5:
-            col_f_data = st.selectbox("Data", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["dt_inser", "dt_saida", "data", "emissao", "faturamento", "dt"])))
+            col_f_data = st.selectbox("Data", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["dt_inser", "dt inser", "data inser", "dt_saida", "data", "emissao", "faturamento", "dt"])))
 
         # Opção inteligente para valor da Aba 1 (caso Fortpel tenha apenas soma total)
         tem_valor_bi = (col_novos_val is not None) and (col_reat_val is not None)
@@ -437,12 +438,20 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 mask_status = df_fortpel['STATUS'].astype(str).str.upper().isin(status_validos)
 
                 if "Sem restrição" in modo_filtro_roleta:
-                    # Sem restrição de data
-                    df_aba1 = df_fortpel[mask_status].copy()
+                    # Sem restrição de data de início, mas limita até a data fim (não puxa compras futuras)
+                    mask_data_f = (df_fortpel['__DATA_DT'].dt.date <= dt_fim) if pd.notna(dt_fim) else True
+                    df_aba1 = df_fortpel[mask_data_f & mask_status].copy()
                 else:
                     # FILTRAR POR PERÍODO INCLUSIVO
                     mask_data_f = (df_fortpel['__DATA_DT'].dt.date >= dt_inicio) & (df_fortpel['__DATA_DT'].dt.date <= dt_fim)
                     df_aba1 = df_fortpel[mask_data_f & mask_status].copy()
+
+                    # Fallback inteligente: se o filtro estrito não encontrou nada, mas os clientes do BI existem na base
+                    if df_aba1.empty and mask_status.sum() > 0:
+                        mask_data_f_flex = (df_fortpel['__DATA_DT'].dt.date <= dt_fim) if pd.notna(dt_fim) else True
+                        df_aba1 = df_fortpel[mask_data_f_flex & mask_status].copy()
+                        if not df_aba1.empty:
+                            st.warning(f"⚠️ Atenção: Não foram encontrados pedidos exatamente no intervalo selecionado ({dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}), mas os clientes foram localizados na base. Os pedidos foram recuperados considerando os registros até a data limite!")
 
                 # Desduplicação por Cliente Único (Padrão BI) se selecionado
                 if "Cliente Único" in criterio_roleta:
