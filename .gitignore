@@ -1,0 +1,28 @@
+# Planilhas com dados locais confidenciais
+*.xlsx
+*.xls
+*.csv
+
+# Diretórios de arquivos e planilhas geradas
+arquivos_entrada/*
+!arquivos_entrada/.gitkeep
+planilhas_geradas/*
+!planilhas_geradas/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# IDE e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
