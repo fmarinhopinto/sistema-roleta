@@ -84,6 +84,8 @@ def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_
         top=Side(style='thin', color='D9D9D9'),
         bottom=Side(style='thin', color='D9D9D9')
     )
+    fonte_alerta_vermelho = Font(name="Calibri", size=11, bold=True, color="9C0006")
+    fill_alerta_vermelho = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
     # Cabeçalho Principal (A1:G1)
     cabecalhos_dados = ['VENDEDOR', titulo_col_id, 'CLIENTE', 'VALOR', 'STATUS', 'DATA', 'BRINDE ROLETA']
@@ -107,6 +109,9 @@ def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_
 
     for _, r in df_dados.iterrows():
         vend = r['VENDEDOR_CLEAN']
+        tem_duas_compras = bool(r.get('TEM_DUAS_COMPRAS', False))
+        obs_brinde = str(r.get('BRINDE ROLETA', '')) if pd.notna(r.get('BRINDE ROLETA', '')) else ""
+
         ws.cell(row=linha_atual, column=1, value=vend)
         ws.cell(row=linha_atual, column=2, value=r[col_id_nome])
         ws.cell(row=linha_atual, column=3, value=str(r[col_cli_nome]))
@@ -121,10 +126,16 @@ def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_
         c_dt.number_format = 'DD/MM/YYYY'
         c_dt.alignment = Alignment(horizontal="center")
 
-        ws.cell(row=linha_atual, column=7, value="")
+        ws.cell(row=linha_atual, column=7, value=obs_brinde)
 
         for c in range(1, 8):
-            ws.cell(row=linha_atual, column=c).border = borda_fina
+            cell_item = ws.cell(row=linha_atual, column=c)
+            cell_item.border = borda_fina
+            if tem_duas_compras:
+                cell_item.fill = fill_alerta_vermelho
+                cell_item.font = fonte_alerta_vermelho
+                if c == 7:
+                    cell_item.alignment = Alignment(horizontal="center", vertical="center")
 
         if vend not in grupos_vendedores:
             grupos_vendedores[vend] = []
@@ -451,6 +462,28 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 else:
                     df_aba1['VALOR_NUM'] = df_aba1[col_f_val].apply(limpar_valor)
 
+                # ========================================================
+                # REGRA: VERIFICAR OUTRO PEDIDO NO MESMO MÊS DO PERÍODO
+                # ========================================================
+                meses_periodo = set(pd.date_range(dt_inicio, dt_fim).to_period('M'))
+                mask_meses_f = df_fortpel['__DATA_DT'].dt.to_period('M').isin(meses_periodo)
+                pedidos_no_mes = df_fortpel[mask_meses_f].groupby('__CLI_NORM')[col_f_ped].nunique().to_dict()
+
+                def verificar_duas_compras(cli_norm):
+                    qtd = pedidos_no_mes.get(cli_norm, 1)
+                    return qtd > 1
+
+                def gerar_rotulo_brinde(cli_norm):
+                    qtd = pedidos_no_mes.get(cli_norm, 1)
+                    if qtd == 2:
+                        return "DUAS COMPRAS"
+                    elif qtd > 2:
+                        return f"DUAS COMPRAS ({qtd} PEDIDOS)"
+                    return ""
+
+                df_aba1['TEM_DUAS_COMPRAS'] = df_aba1['__CLI_NORM'].apply(verificar_duas_compras)
+                df_aba1['BRINDE ROLETA'] = df_aba1['__CLI_NORM'].apply(gerar_rotulo_brinde)
+
                 # ==========================================
                 # ABA 2: PROPOSTAS ENVIADAS (TABELA DINÂMICA ADM)
                 # ==========================================
@@ -516,7 +549,10 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 t1, t2 = st.tabs([f"Aba 1: {nome_aba1}", f"Aba 2: {nome_aba2}"])
                 with t1:
                     if not df_aba1.empty:
-                        st.dataframe(df_aba1[['VENDEDOR_CLEAN', col_f_ped, col_f_cli, 'VALOR_NUM', 'STATUS', '__DATA_DT']], use_container_width=True)
+                        qtd_duas_compras = int(df_aba1['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1 else 0
+                        if qtd_duas_compras > 0:
+                            st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
+                        st.dataframe(df_aba1[['VENDEDOR_CLEAN', col_f_ped, col_f_cli, 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
                     else:
                         st.write("Sem registros no período para a Aba 1.")
                 with t2:
