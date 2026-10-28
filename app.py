@@ -3,6 +3,8 @@ import os
 import re
 import unicodedata
 import datetime
+import time
+import zoneinfo
 import pickle
 from pathlib import Path
 import streamlit as st
@@ -10,6 +12,50 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+# --- CONFIGURAÇÃO DE FUSO HORÁRIO OFICIAL DO BRASIL (BRASÍLIA / UTC-3) ---
+try:
+    os.environ['TZ'] = 'America/Sao_Paulo'
+    if hasattr(time, 'tzset'):
+        time.tzset()
+except Exception:
+    pass
+
+try:
+    FUSO_BRASIL = zoneinfo.ZoneInfo("America/Sao_Paulo")
+except Exception:
+    FUSO_BRASIL = datetime.timezone(datetime.timedelta(hours=-3))
+
+def obter_agora_brasil():
+    """Retorna datetime atual sempre no fuso oficial do Brasil (America/Sao_Paulo - Brasília)."""
+    try:
+        return datetime.datetime.now(FUSO_BRASIL)
+    except Exception:
+        return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-3)))
+
+def obter_hoje_brasil():
+    """Retorna a data atual (date) no fuso oficial do Brasil."""
+    return obter_agora_brasil().date()
+
+def obter_timestamp_formatado_brasil():
+    """Retorna timestamp formatado 'DD/MM HH:MM' no horário oficial do Brasil."""
+    return obter_agora_brasil().strftime("%d/%m %H:%M")
+
+def converter_timestamp_utc_para_brasil(ts_str):
+    """
+    Converte um timestamp string gravado anteriormente em UTC no servidor na nuvem
+    (ex: '28/10 17:50') para o horário oficial de Brasília (ex: '28/10 14:50').
+    """
+    if not isinstance(ts_str, str) or not ts_str.strip():
+        return ts_str
+    try:
+        ts_limpo = ts_str.strip()
+        ano_atual = obter_agora_brasil().year
+        dt = datetime.datetime.strptime(f"{ano_atual}/{ts_limpo}", "%Y/%d/%m %H:%M")
+        dt_br = dt - datetime.timedelta(hours=3)
+        return dt_br.strftime("%d/%m %H:%M")
+    except Exception:
+        return ts_str
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -34,6 +80,8 @@ def salvar_dados_operador(nome_op, dados_dict):
     Persiste os dados de um operador em disco para sincronização
     entre navegadores e computadores diferentes (Filipe <-> Francine).
     """
+    if isinstance(dados_dict, dict):
+        dados_dict['tz_brasil'] = True
     prefixo = nome_op.lower()
     arquivo_pkl = PASTA_STORAGE / f"{prefixo}_dados.pkl"
     try:
@@ -45,13 +93,26 @@ def salvar_dados_operador(nome_op, dados_dict):
 def carregar_dados_operador(nome_op):
     """
     Carrega os dados persistidos de um operador diretamente do disco do servidor.
+    Se o timestamp foi salvo anteriormente em UTC pelo servidor na nuvem,
+    migra automaticamente para o Horário de Brasília (UTC-3).
     """
     prefixo = nome_op.lower()
     arquivo_pkl = PASTA_STORAGE / f"{prefixo}_dados.pkl"
     if arquivo_pkl.exists():
         try:
             with open(arquivo_pkl, "rb") as f:
-                return pickle.load(f)
+                dados = pickle.load(f)
+
+            if isinstance(dados, dict) and 'timestamp' in dados:
+                if not dados.get('tz_brasil'):
+                    dados['timestamp'] = converter_timestamp_utc_para_brasil(dados['timestamp'])
+                    dados['tz_brasil'] = True
+                    try:
+                        with open(arquivo_pkl, "wb") as f_save:
+                            pickle.dump(dados, f_save)
+                    except Exception:
+                        pass
+            return dados
         except Exception as e:
             print(f"Erro ao ler dados de {nome_op}: {e}")
     return None
@@ -932,7 +993,8 @@ def modal_upload_ajustada():
                 # Atualiza objeto de persistência
                 existente_fra = carregar_dados_operador("FRANCINE") or {}
                 existente_fra.update({
-                    'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                    'timestamp': obter_timestamp_formatado_brasil(),
+                    'tz_brasil': True,
                     'processado': True,
                     'usando_ajustada': True,
                     'df_aba1': dados_fra['df_aba1'],
@@ -975,7 +1037,8 @@ def modal_upload_ajustada():
 
                 existente_fil = carregar_dados_operador("FILIPE") or {}
                 existente_fil.update({
-                    'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                    'timestamp': obter_timestamp_formatado_brasil(),
+                    'tz_brasil': True,
                     'processado': True,
                     'usando_ajustada': True,
                     'df_aba1': dados_fil['df_aba1'],
@@ -1407,7 +1470,7 @@ def modal_resultados_finais():
     st.markdown("---")
 
     bytes_excel_final = gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_escolhida)
-    nome_arq_final = f"Resultados_Finais_Roleta_Consolidado_{datetime.date.today().strftime('%d%m%Y')}.xlsx"
+    nome_arq_final = f"Resultados_Finais_Roleta_Consolidado_{obter_hoje_brasil().strftime('%d%m%Y')}.xlsx"
 
     col_exp1, col_exp2 = st.columns([2, 1])
     with col_exp1:
@@ -1620,7 +1683,7 @@ def renderizar_painel_operador(nome_op):
     # --- SEÇÃO 2: CONFIGURAÇÕES DE PERÍODO E PARÂMETROS ---
     st.markdown("#### 2. Configuração de Período e Parâmetros")
 
-    hoje = datetime.date.today()
+    hoje = obter_hoje_brasil()
     inicio_padrao = hoje.replace(day=1)
     fim_padrao = hoje
 
@@ -1868,7 +1931,8 @@ def renderizar_painel_operador(nome_op):
                     # PERSISTÊNCIA COMPARTILHADA EM DISCO
                     # ========================================================
                     dados_operador_disco = {
-                        'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                        'timestamp': obter_timestamp_formatado_brasil(),
+                        'tz_brasil': True,
                         'processado': True,
                         'usando_ajustada': False,
                         'df_aba1': df_aba1,
