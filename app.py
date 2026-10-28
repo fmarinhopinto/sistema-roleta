@@ -317,8 +317,245 @@ def estilizar_aba_produtos(ws, df_top_notas, df_lideres_cat):
         ws.column_dimensions[letra].width = max(tamanho_max + 3, 14)
 
 
+CATEGORIAS_ROLETA = [
+    "ALIMENTOS E BEBIDAS",
+    "EMBALAGENS E DESCARTAVEIS",
+    "EPI'S",
+    "HIGIENE E LIMPEZA",
+    "INFORMÁTICA",
+    "MRO",
+    "OFFICE"
+]
+
+def extrair_ranking_categoria(df_cat_raw, categoria_alvo, df_fortpel=None, df_adm=None):
+    """
+    Processa a planilha de categorias (formato wide como categorias.xlsx ou long como produtos.xlsx)
+    e retorna: (df_ranking_cat, total_geral_cat, df_lideres_todas_categorias)
+    """
+    if df_cat_raw is None or df_cat_raw.empty:
+        return pd.DataFrame(), 0.0, pd.DataFrame()
+
+    # Monta mapa de cliente -> vendedor a partir do Fortpel e ADM
+    mapa_cli_vend = {}
+    if df_fortpel is not None and not df_fortpel.empty:
+        col_c = None
+        for cand in ['nome_cliente', 'cliente', 'razao', 'nome']:
+            for c in df_fortpel.columns:
+                if cand in str(c).lower():
+                    col_c = c
+                    break
+            if col_c:
+                break
+
+        col_v = None
+        for cand in ['carteira', 'operador', 'vendedor', 'gestor']:
+            for c in df_fortpel.columns:
+                if cand in str(c).lower():
+                    col_v = c
+                    break
+            if col_v:
+                break
+
+        if col_c and col_v:
+            df_f_clean = df_fortpel.dropna(subset=[col_c, col_v]).copy()
+            df_f_clean['__C_NORM'] = df_f_clean[col_c].apply(normalizar_texto)
+            grp = df_f_clean.groupby('__C_NORM')[col_v].agg(lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0])
+            for cli, v in grp.items():
+                mapa_cli_vend[cli] = str(v).strip().upper()
+
+    if df_adm is not None and not df_adm.empty:
+        col_ac = None
+        col_av = None
+        for cand in ['nome do cliente', 'cliente', 'nome']:
+            for c in df_adm.columns:
+                if cand in str(c).lower():
+                    col_ac = c
+                    break
+            if col_ac:
+                break
+        for cand in ['vendedor do cliente', 'vendedor', 'operador']:
+            for c in df_adm.columns:
+                if cand in str(c).lower():
+                    col_av = c
+                    break
+            if col_av:
+                break
+        if col_ac and col_av:
+            for _, r in df_adm.dropna(subset=[col_ac, col_av]).iterrows():
+                cn = normalizar_texto(r[col_ac])
+                if cn and cn not in mapa_cli_vend:
+                    mapa_cli_vend[cn] = str(r[col_av]).strip().upper()
+
+    # Trata cabeçalhos da planilha de categorias
+    df_work = df_cat_raw.copy()
+    if str(df_work.iloc[0, 0]).strip().lower() in ['cliente', 'codigo', 'cod']:
+        df_work = df_work.iloc[1:].copy()
+
+    # Remove linhas finais de total / filtros
+    df_work = df_work[~df_work.iloc[:, 0].astype(str).str.upper().str.contains('TOTAL|FILTROS APLICADOS', na=False)].copy()
+
+    # Verifica se é formato WIDE (onde as colunas são as próprias categorias)
+    cols_map = {}
+    for col in df_work.columns:
+        c_norm = normalizar_texto(col).replace("'", "").replace(" ", "")
+        for cat in CATEGORIAS_ROLETA:
+            cat_norm = normalizar_texto(cat).replace("'", "").replace(" ", "")
+            if cat_norm == c_norm or cat_norm in c_norm or c_norm in cat_norm:
+                cols_map[cat] = col
+
+    lideres_todas = []
+
+    if len(cols_map) >= 2:
+        # FORMATO WIDE
+        col_id_primeira = df_work.columns[0]
+        df_work['__ID_NORM'] = df_work[col_id_primeira].apply(normalizar_texto)
+
+        def obter_vendedor(id_norm):
+            if id_norm in mapa_cli_vend:
+                return mapa_cli_vend[id_norm]
+            return id_norm
+
+        df_work['__VENDEDOR'] = df_work['__ID_NORM'].apply(obter_vendedor)
+
+        for cat in CATEGORIAS_ROLETA:
+            c_nome = cols_map.get(cat)
+            if c_nome and c_nome in df_work.columns:
+                df_work[f'__VAL_{cat}'] = df_work[c_nome].apply(limpar_valor)
+                res_cat = (
+                    df_work.groupby('__VENDEDOR', as_index=False)[f'__VAL_{cat}']
+                    .sum()
+                    .rename(columns={'__VENDEDOR': 'Vendedor', f'__VAL_{cat}': 'Valor_Total'})
+                    .sort_values(by='Valor_Total', ascending=False)
+                )
+                res_cat = res_cat[res_cat['Valor_Total'] > 0]
+                if not res_cat.empty:
+                    top_v = res_cat.iloc[0]
+                    lideres_todas.append({
+                        'Categoria': cat,
+                        'Vendedor': top_v['Vendedor'],
+                        'Valor_Total': top_v['Valor_Total'],
+                        'Total_Categoria': res_cat['Valor_Total'].sum()
+                    })
+
+        col_alvo = cols_map.get(categoria_alvo)
+        if col_alvo and col_alvo in df_work.columns:
+            df_work['__VAL_ALVO'] = df_work[col_alvo].apply(limpar_valor)
+            df_rank_alvo = (
+                df_work.groupby('__VENDEDOR', as_index=False)
+                .agg(
+                    Total_Vendido=('__VAL_ALVO', 'sum'),
+                    Qtd_Itens=('__VAL_ALVO', lambda s: (s > 0).sum())
+                )
+                .rename(columns={'__VENDEDOR': 'Vendedor'})
+                .sort_values(by='Total_Vendido', ascending=False)
+            )
+            df_rank_alvo = df_rank_alvo[df_rank_alvo['Total_Vendido'] > 0]
+            total_alvo = df_rank_alvo['Total_Vendido'].sum()
+            return df_rank_alvo, total_alvo, pd.DataFrame(lideres_todas)
+
+    else:
+        # FORMATO LONG (colunas Categoria, Vendedor, Valor)
+        col_c = identificar_coluna(df_work.columns, ["categoria", "grupo", "linha", "subgrupo", "descr. produto", "descricao"])
+        col_v = identificar_coluna(df_work.columns, ["vendedor", "operador", "gestor", "representante", "carteira"])
+        col_val = identificar_coluna(df_work.columns, ["vendas total", "venda total", "venda", "valor total", "valor", "total", "preco"])
+
+        if col_c and col_v and col_val:
+            df_work['__VALOR_NUM'] = df_work[col_val].apply(limpar_valor)
+            df_work['__VEND_LIMPO'] = df_work[col_v].astype(str).str.strip().str.upper()
+
+            for cat in CATEGORIAS_ROLETA:
+                cat_norm = normalizar_texto(cat)
+                m_cat = df_work[col_c].apply(lambda x: cat_norm in normalizar_texto(x) or normalizar_texto(x) in cat_norm)
+                df_sub = df_work[m_cat]
+                if not df_sub.empty:
+                    grp = (
+                        df_sub.groupby('__VEND_LIMPO', as_index=False)['__VALOR_NUM']
+                        .sum()
+                        .rename(columns={'__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
+                        .sort_values(by='Valor_Total', ascending=False)
+                    )
+                    grp = grp[grp['Valor_Total'] > 0]
+                    if not grp.empty:
+                        lideres_todas.append({
+                            'Categoria': cat,
+                            'Vendedor': grp.iloc[0]['Vendedor'],
+                            'Valor_Total': grp.iloc[0]['Valor_Total'],
+                            'Total_Categoria': grp['Valor_Total'].sum()
+                        })
+
+            cat_alvo_norm = normalizar_texto(categoria_alvo)
+            m_alvo = df_work[col_c].apply(lambda x: cat_alvo_norm in normalizar_texto(x) or normalizar_texto(x) in cat_alvo_norm)
+            df_sub_alvo = df_work[m_alvo]
+            if not df_sub_alvo.empty:
+                df_rank_alvo = (
+                    df_sub_alvo.groupby('__VEND_LIMPO', as_index=False)
+                    .agg(
+                        Total_Vendido=('__VALOR_NUM', 'sum'),
+                        Qtd_Itens=('__VALOR_NUM', 'count')
+                    )
+                    .rename(columns={'__VEND_LIMPO': 'Vendedor'})
+                    .sort_values(by='Total_Vendido', ascending=False)
+                )
+                df_rank_alvo = df_rank_alvo[df_rank_alvo['Total_Vendido'] > 0]
+                total_alvo = df_rank_alvo['Total_Vendido'].sum()
+                return df_rank_alvo, total_alvo, pd.DataFrame(lideres_todas)
+
+    return pd.DataFrame(), 0.0, pd.DataFrame(lideres_todas)
+
+def extrair_maior_venda_nota(df_fortpel, col_nota, col_vend, col_val, dt_inicio=None, dt_fim=None, df_cat_raw=None):
+    """
+    Calcula as maiores vendas em nota única.
+    Extrai primariamente a partir da base de pedidos do Fortpel.
+    Se df_cat_raw contiver itens detalhados por nota (ex: produtos.xlsx com n_nota_obs), complementa/reforça.
+    """
+    df_top_notas = pd.DataFrame()
+
+    # 1. Tenta extrair de df_fortpel
+    if df_fortpel is not None and not df_fortpel.empty and col_nota and col_vend and col_val:
+        df_f = df_fortpel.copy()
+        df_f['__VALOR_NUM'] = df_f[col_val].apply(limpar_valor)
+        df_f['__VEND_LIMPO'] = df_f[col_vend].astype(str).str.strip().str.upper()
+
+        if '__DATA_DT' in df_f.columns and pd.notna(dt_inicio) and pd.notna(dt_fim):
+            mask_dt = (df_f['__DATA_DT'].dt.date >= dt_inicio) & (df_f['__DATA_DT'].dt.date <= dt_fim)
+            df_sub = df_f[mask_dt].copy()
+            if df_sub.empty:
+                df_sub = df_f.copy()
+        else:
+            df_sub = df_f.copy()
+
+        # Group by nota e vendedor
+        df_grp = (
+            df_sub.groupby([col_nota, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
+            .sum()
+            .rename(columns={col_nota: 'Nota', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
+            .sort_values(by='Valor_Total', ascending=False)
+        )
+        df_grp = df_grp[df_grp['Valor_Total'] > 0]
+        if df_grp['Valor_Total'].nunique() > 1:
+            df_top_notas = df_grp
+
+    # 2. Se df_fortpel tiver valores constantes ou vazios, verifica se df_cat_raw tem itens por nota (como produtos.xlsx)
+    if df_top_notas.empty and df_cat_raw is not None and not df_cat_raw.empty:
+        col_n = identificar_coluna(df_cat_raw.columns, ["n_nota_obs", "nota", "nf", "pedido"])
+        col_v = identificar_coluna(df_cat_raw.columns, ["vendedor", "operador", "gestor", "carteira"])
+        col_vl = identificar_coluna(df_cat_raw.columns, ["vendas total", "venda total", "venda", "valor total", "valor"])
+        if col_n and col_v and col_vl and col_n in df_cat_raw.columns and col_v in df_cat_raw.columns and col_vl in df_cat_raw.columns:
+            df_c_clean = df_cat_raw.dropna(subset=[col_n, col_v, col_vl]).copy()
+            df_c_clean['__VAL_N'] = df_c_clean[col_vl].apply(limpar_valor)
+            df_c_clean['__VEND_N'] = df_c_clean[col_v].astype(str).str.strip().str.upper()
+            df_top_notas = (
+                df_c_clean.groupby([col_n, '__VEND_N'], as_index=False)['__VAL_N']
+                .sum()
+                .rename(columns={col_n: 'Nota', '__VEND_N': 'Vendedor', '__VAL_N': 'Valor_Total'})
+                .sort_values(by='Valor_Total', ascending=False)
+            )
+
+    return df_top_notas
+
+
 # --- SELEÇÃO / UPLOAD DOS ARQUIVOS ---
-st.subheader("1. Arquivos de Entrada (Bases BI, Fortpel, ADM e Produtos)")
+st.subheader("1. Arquivos de Entrada (Bases BI, Fortpel, ADM e Categorias)")
 
 modo_leitura = st.radio(
     "Como deseja carregar os arquivos?",
@@ -330,7 +567,8 @@ file_novos = None
 file_reativados = None
 file_fortpel = None
 file_adm = None
-file_produtos = None
+file_categorias = None
+categoria_solicitada = "HIGIENE E LIMPEZA"
 
 if modo_leitura == "Fazer Upload pelo Navegador":
     c1, c2 = st.columns(2)
@@ -343,7 +581,18 @@ if modo_leitura == "Fazer Upload pelo Navegador":
         file_fortpel = st.file_uploader("📥 3. Acompanhamento Fortpel (Pedidos)", type=["xlsx", "xls", "csv"], key="up_fort")
     with c4:
         file_adm = st.file_uploader("📥 4. Planilha ADM (Orçamentos Efetivados)", type=["xlsx", "xls", "csv"], key="up_adm")
-    file_produtos = st.file_uploader("📥 5. Planilha de Produtos do BI (Maior Venda em Nota Única e Categorias)", type=["xlsx", "xls", "csv"], key="up_prod")
+
+    c5, c6 = st.columns([2, 1])
+    with c5:
+        file_categorias = st.file_uploader("📥 5. Planilha de Categorias do BI", type=["xlsx", "xls", "csv"], key="up_cat")
+    with c6:
+        categoria_solicitada = st.selectbox(
+            "🏷️ Categoria Solicitada:",
+            CATEGORIAS_ROLETA,
+            index=3,
+            help="Selecione a categoria para identificar o vendedor com a maior venda.",
+            key="sel_cat_req"
+        )
 
 else:
     # Busca tanto na pasta 'arquivos_entrada' quanto na pasta raiz do sistema
@@ -364,7 +613,7 @@ else:
         padrao_reat = buscar_arquivo_padrao(arquivos_locais, ["reativ"])
         padrao_fort = buscar_arquivo_padrao(arquivos_locais, ["acomp", "fortpel"])
         padrao_adm = buscar_arquivo_padrao(arquivos_locais, ["adm", "orcamento", "proposta"])
-        padrao_prod = buscar_arquivo_padrao(arquivos_locais, ["prod", "item", "data", "venda"])
+        padrao_cat = buscar_arquivo_padrao(arquivos_locais, ["categoria", "cat", "prod", "data (7", "data (8"])
 
         c1, c2 = st.columns(2)
         c3, c4 = st.columns(2)
@@ -394,10 +643,20 @@ else:
             if nome_a != "Selecione...":
                 file_adm = resolver_caminho(nome_a)
 
-        idx_p = opcoes.index(padrao_prod) if padrao_prod in opcoes else 0
-        nome_p = st.selectbox("5. Planilha de Produtos do BI (Destaques e Categorias):", opcoes, index=idx_p, key="loc_prod")
-        if nome_p != "Selecione...":
-            file_produtos = resolver_caminho(nome_p)
+        c5, c6 = st.columns([2, 1])
+        with c5:
+            idx_p = opcoes.index(padrao_cat) if padrao_cat in opcoes else 0
+            nome_p = st.selectbox("5. Planilha de Categorias do BI (Opcional):", opcoes, index=idx_p, key="loc_cat")
+            if nome_p != "Selecione...":
+                file_categorias = resolver_caminho(nome_p)
+        with c6:
+            categoria_solicitada = st.selectbox(
+                "🏷️ Categoria Solicitada:",
+                CATEGORIAS_ROLETA,
+                index=3,
+                help="Selecione a categoria para identificar o vendedor com a maior venda.",
+                key="sel_cat_req_loc"
+            )
 
 
 # --- MAPEAMENTO E PROCESSAMENTO ---
@@ -408,24 +667,24 @@ if file_novos and file_reativados and file_fortpel and file_adm:
             df_reativados_raw = carregar_dados(file_reativados)
             df_fortpel_raw = carregar_dados(file_fortpel)
             df_adm_raw = carregar_dados(file_adm)
-            df_produtos_raw = carregar_dados(file_produtos) if file_produtos else None
+            df_categorias_raw = carregar_dados(file_categorias) if file_categorias else None
     except Exception as e:
         st.error(f"Erro ao ler arquivos: {e}")
         st.stop()
 
-    qtd_bases = 5 if df_produtos_raw is not None else 4
+    qtd_bases = 5 if df_categorias_raw is not None else 4
     st.success(f"As {qtd_bases} bases foram carregadas com sucesso!")
 
     st.subheader("2. Mapeamento das Colunas Chave")
     titulos_abas_map = ["Bases do BI", "Acompanhamento Fortpel", "Planilha ADM (Orçamentos)"]
-    if df_produtos_raw is not None:
-        titulos_abas_map.append("Planilha de Produtos (BI)")
+    if df_categorias_raw is not None:
+        titulos_abas_map.append("Planilha de Categorias (BI)")
 
     abas_mapeamento = st.tabs(titulos_abas_map)
     tab_bi = abas_mapeamento[0]
     tab_fortpel = abas_mapeamento[1]
     tab_adm = abas_mapeamento[2]
-    tab_prod = abas_mapeamento[3] if df_produtos_raw is not None else None
+    tab_cat = abas_mapeamento[3] if df_categorias_raw is not None else None
 
     with tab_bi:
         c_b1, c_b2 = st.columns(2)
@@ -445,16 +704,20 @@ if file_novos and file_reativados and file_fortpel and file_adm:
             col_reat_val = identificar_coluna(df_reativados_raw.columns, ["venda", "valor", "total", "faturado"])
 
     with tab_fortpel:
-        c_f1, c_f2, c_f3, c_f4, c_f5 = st.columns(5)
+        c_f1, c_f2, c_f3 = st.columns(3)
+        c_f4, c_f5, c_f6 = st.columns(3)
         with c_f1:
             col_f_cli = st.selectbox("Cliente", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["cliente", "razao", "nome"])))
         with c_f2:
             col_f_ped = st.selectbox("Pedido", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["pedido", "numero", "ordem"])))
         with c_f3:
-            col_f_vend = st.selectbox("Vendedor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["operador", "vendedor", "representante", "usuario", "gestor"])))
+            idx_not = df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["nota", "nf", "n_nota", "n_nota_obs", "pedido"]))
+            col_f_nota = st.selectbox("Nota Fiscal (para Maior Venda em Nota Única):", df_fortpel_raw.columns, index=idx_not)
         with c_f4:
-            col_f_val = st.selectbox("Valor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["valor", "total", "faturado", "preco", "somadevl"])))
+            col_f_vend = st.selectbox("Vendedor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["carteira", "operador", "vendedor", "representante", "gestor"])))
         with c_f5:
+            col_f_val = st.selectbox("Valor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["valor", "total", "faturado", "preco", "somadevl"])))
+        with c_f6:
             col_f_data = st.selectbox("Data", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["dt_inser", "dt inser", "data inser", "dt_saida", "data", "emissao", "faturamento", "dt"])))
 
         # Opção inteligente para valor da Aba 1 (caso Fortpel tenha apenas soma total)
@@ -487,32 +750,15 @@ if file_novos and file_reativados and file_fortpel and file_adm:
             help="Selecione quais status entram na contagem. Por padrão, todos os status presentes na planilha são contabilizados."
         )
 
-    col_p_vend = None
-    col_p_nota = None
-    col_p_val = None
-    col_p_cat = None
-    if tab_prod is not None:
-        with tab_prod:
-            st.markdown("📦 **Planilha de Produtos do BI (Destaques e Categorias)**")
-            st.caption("Identifique as colunas para cálculo da maior venda em nota única e líderes por categoria.")
-            c_p1, c_p2 = st.columns(2)
-            c_p3, c_p4 = st.columns(2)
-            with c_p1:
-                col_padrao_v = identificar_coluna(df_produtos_raw.columns, ["vendedor", "operador", "gestor", "representante"])
-                idx_pv = df_produtos_raw.columns.get_loc(col_padrao_v) if col_padrao_v in df_produtos_raw.columns else 0
-                col_p_vend = st.selectbox("Coluna Vendedor (Produtos):", df_produtos_raw.columns, index=idx_pv)
-            with c_p2:
-                col_padrao_n = identificar_coluna(df_produtos_raw.columns, ["n_nota_obs", "nota", "nf", "pedido", "numero"])
-                idx_pn = df_produtos_raw.columns.get_loc(col_padrao_n) if col_padrao_n in df_produtos_raw.columns else 0
-                col_p_nota = st.selectbox("Coluna Nota Fiscal / Pedido (Produtos):", df_produtos_raw.columns, index=idx_pn)
-            with c_p3:
-                col_padrao_val = identificar_coluna(df_produtos_raw.columns, ["vendas total", "venda total", "venda", "valor total", "valor", "total", "preco"])
-                idx_pval = df_produtos_raw.columns.get_loc(col_padrao_val) if col_padrao_val in df_produtos_raw.columns else 0
-                col_p_val = st.selectbox("Coluna Valor da Venda (Produtos):", df_produtos_raw.columns, index=idx_pval)
-            with c_p4:
-                col_padrao_cat = identificar_coluna(df_produtos_raw.columns, ["categoria", "grupo", "linha", "subgrupo", "familia", "descr. produto", "descricao", "produto"])
-                idx_pcat = df_produtos_raw.columns.get_loc(col_padrao_cat) if col_padrao_cat in df_produtos_raw.columns else 0
-                col_p_cat = st.selectbox("Coluna Categoria / Produto:", df_produtos_raw.columns, index=idx_pcat)
+    if tab_cat is not None:
+        with tab_cat:
+            st.markdown("📦 **Planilha de Categorias do BI**")
+            st.caption("Verificação automática das categorias oficiais na planilha carregada.")
+            encontradas = [cat for cat in CATEGORIAS_ROLETA if any(normalizar_texto(cat).replace("'", "").replace(" ", "") in normalizar_texto(str(col)).replace("'", "").replace(" ", "") for col in df_categorias_raw.columns)]
+            if encontradas:
+                st.success(f"✅ {len(encontradas)} das 7 categorias oficiais identificadas nas colunas: {', '.join(encontradas)}")
+            else:
+                st.info("Formato detalhado por produto/linha detectado. O sistema cruzará os dados automaticamente.")
 
     # Conversão de Datas (Apenas Fortpel requer data)
     df_fortpel = df_fortpel_raw.copy()
@@ -647,37 +893,36 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 df_aba2.columns = ['Vendedor', 'Qtd']
                 df_aba2 = df_aba2.sort_values(by=['Qtd', 'Vendedor'], ascending=[False, True])
 
-                # ==========================================
-                # ABA 3: PRODUTOS BI (DESTAQUES & CATEGORIAS)
-                # ==========================================
-                df_top_notas = pd.DataFrame()
+                # ========================================================
+                # 🏆 MAIOR VENDA EM NOTA ÚNICA (EXTRAÍDA DAS OUTRAS BASES)
+                # ========================================================
+                df_top_notas = extrair_maior_venda_nota(
+                    df_fortpel=df_fortpel,
+                    col_nota=col_f_nota,
+                    col_vend=col_f_vend,
+                    col_val=col_f_val,
+                    dt_inicio=dt_inicio,
+                    dt_fim=dt_fim,
+                    df_cat_raw=df_categorias_raw
+                )
+
+                # ========================================================
+                # 🏷️ CATEGORIAS DO BI (SE PLANILHA 5 FOI CARREGADA)
+                # ========================================================
+                df_rank_cat = pd.DataFrame()
+                total_geral_cat = 0.0
                 df_lideres_cat = pd.DataFrame()
-                df_produtos_calc = pd.DataFrame()
 
-                if df_produtos_raw is not None and col_p_nota and col_p_vend and col_p_val and col_p_cat:
-                    df_produtos_calc = df_produtos_raw.dropna(subset=[col_p_nota, col_p_vend, col_p_val]).copy()
-                    df_produtos_calc['__VALOR_NUM'] = df_produtos_calc[col_p_val].apply(limpar_valor)
-                    df_produtos_calc['__VEND_LIMPO'] = df_produtos_calc[col_p_vend].astype(str).str.strip().str.upper()
-
-                    # 1. Maior venda em uma única nota
-                    df_top_notas = (
-                        df_produtos_calc.groupby([col_p_nota, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
-                        .sum()
-                        .rename(columns={col_p_nota: 'Nota', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
-                        .sort_values(by='Valor_Total', ascending=False)
+                if df_categorias_raw is not None:
+                    df_rank_cat, total_geral_cat, df_lideres_cat = extrair_ranking_categoria(
+                        df_cat_raw=df_categorias_raw,
+                        categoria_alvo=categoria_solicitada,
+                        df_fortpel=df_fortpel,
+                        df_adm=df_adm_raw
                     )
-
-                    # 2. Líderes por Categoria
-                    df_cat_totais = (
-                        df_produtos_calc.groupby([col_p_cat, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
-                        .sum()
-                        .rename(columns={col_p_cat: 'Categoria', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
-                        .sort_values(by=['Categoria', 'Valor_Total'], ascending=[True, False])
-                    )
-                    df_lideres_cat = df_cat_totais.drop_duplicates(subset=['Categoria'], keep='first').sort_values(by='Valor_Total', ascending=False)
 
                 # ==========================================
-                # GERAÇÃO DO WORKBOOK
+                # GERAÇÃO DO WORKBOOK EXCEL (3 ABAS)
                 # ==========================================
                 wb = openpyxl.Workbook()
 
@@ -703,10 +948,9 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 else:
                     ws2.cell(row=1, column=1, value="Nenhum registro encontrado na planilha ADM.")
 
-                # Preencher Aba 3 (se houver dados de produtos)
-                if df_produtos_raw is not None and not df_top_notas.empty:
-                    ws3 = wb.create_sheet(title="Destaques Produtos BI")
-                    estilizar_aba_produtos(ws3, df_top_notas, df_lideres_cat)
+                # Preencher Aba 3: Destaques Roleta (Nota Única + Categorias)
+                ws3 = wb.create_sheet(title="Destaques Roleta")
+                estilizar_aba_produtos(ws3, df_top_notas, df_lideres_cat)
 
                 nome_arquivo_saida = f"Controle_roleta_{dt_inicio.strftime('%d%m')}_a_{dt_fim.strftime('%d%m')}.xlsx"
                 caminho_salvar_local = PASTA_SAIDA / nome_arquivo_saida
@@ -721,10 +965,13 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 st.session_state['df_aba1'] = df_aba1
                 st.session_state['df_aba2'] = df_aba2
                 st.session_state['df_top_notas'] = df_top_notas
+                st.session_state['df_rank_cat'] = df_rank_cat
+                st.session_state['total_geral_cat'] = total_geral_cat
                 st.session_state['df_lideres_cat'] = df_lideres_cat
-                st.session_state['df_produtos_calc'] = df_produtos_calc
-                st.session_state['col_p_cat'] = col_p_cat
-                st.session_state['col_p_vend'] = col_p_vend
+                st.session_state['df_categorias_raw'] = df_categorias_raw
+                st.session_state['df_fortpel'] = df_fortpel
+                st.session_state['df_adm_raw'] = df_adm_raw
+                st.session_state['categoria_solicitada'] = categoria_solicitada
                 st.session_state['col_f_ped'] = col_f_ped
                 st.session_state['col_f_cli'] = col_f_cli
                 st.session_state['nome_aba1'] = nome_aba1
@@ -732,7 +979,7 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 st.session_state['caminho_salvar_local'] = caminho_salvar_local
                 st.session_state['buffer_bytes'] = buffer_download.getvalue()
                 st.session_state['nome_arquivo_saida'] = nome_arquivo_saida
-                st.session_state['tem_produtos'] = (df_produtos_raw is not None and not df_top_notas.empty)
+                st.session_state['tem_categorias'] = (df_categorias_raw is not None)
 
         # Exibição dos Resultados (Persistente no Session State)
         if st.session_state.get('processado', False):
@@ -743,16 +990,11 @@ if file_novos and file_reativados and file_fortpel and file_adm:
             caminho_local_s = st.session_state['caminho_salvar_local']
             buffer_bytes_s = st.session_state['buffer_bytes']
             nome_saida_s = st.session_state['nome_arquivo_saida']
-            tem_prod_s = st.session_state.get('tem_produtos', False)
 
-            qtd_abas_num = 3 if tem_prod_s else 2
-            st.success(f"✅ Planilha gerada com {qtd_abas_num} abas com sucesso!")
+            st.success("✅ Planilha gerada com 3 abas consolidadas com sucesso!")
             st.info(f"📁 Arquivo salvo em: `{caminho_local_s}`")
 
-            abas_titulos = [f"Aba 1: {nome_aba1_s}", f"Aba 2: {nome_aba2_s}"]
-            if tem_prod_s:
-                abas_titulos.append("Aba 3: 📦 Destaques Produtos BI")
-
+            abas_titulos = [f"Aba 1: {nome_aba1_s}", f"Aba 2: {nome_aba2_s}", "Aba 3: 🏆 Destaques Comerciais (Roleta)"]
             abas_res = st.tabs(abas_titulos)
 
             with abas_res[0]:
@@ -771,78 +1013,93 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 else:
                     st.write("Sem registros na planilha ADM.")
 
-            if tem_prod_s and len(abas_res) > 2:
-                with abas_res[2]:
-                    df_top_notas_s = st.session_state['df_top_notas']
-                    df_lideres_cat_s = st.session_state['df_lideres_cat']
-                    df_produtos_calc_s = st.session_state['df_produtos_calc']
-                    p_cat_s = st.session_state['col_p_cat']
+            with abas_res[2]:
+                df_top_notas_s = st.session_state.get('df_top_notas', pd.DataFrame())
+                df_cat_raw_s = st.session_state.get('df_categorias_raw')
+                df_fort_s = st.session_state.get('df_fortpel')
+                df_adm_s = st.session_state.get('df_adm_raw')
+                cat_padrao = st.session_state.get('categoria_solicitada', 'HIGIENE E LIMPEZA')
 
-                    st.markdown("### 🏆 Maior Venda em Nota Única")
-                    if not df_top_notas_s.empty:
-                        top1_nota = df_top_notas_s.iloc[0]
-                        nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
-                        val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                # ========================================================
+                # 🏆 1. MAIOR VENDA EM NOTA ÚNICA (INFORMAÇÃO DA FOTO)
+                # ========================================================
+                st.markdown("### 🏆 Maior Venda em Nota Única")
+                st.caption("Extraído das bases de acompanhamento e pedidos carregadas.")
 
-                        c_m1, c_m2, c_m3 = st.columns(3)
-                        with c_m1:
-                            st.metric("Vendedor Campeão (Nota Única)", str(top1_nota['Vendedor']))
-                        with c_m2:
-                            st.metric("Nota Fiscal", nota_formatada)
-                        with c_m3:
-                            st.metric("Valor Total da Nota", val_formatado)
+                if not df_top_notas_s.empty:
+                    top1_nota = df_top_notas_s.iloc[0]
+                    nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
+                    val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-                        with st.expander("📋 Ver Ranking das Maiores Vendas em Nota Única"):
-                            df_notas_disp = df_top_notas_s.copy()
-                            df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            st.dataframe(df_notas_disp, use_container_width=True)
+                    c_m1, c_m2, c_m3 = st.columns(3)
+                    with c_m1:
+                        st.metric("Vendedor Campeão (Nota Única)", str(top1_nota['Vendedor']))
+                    with c_m2:
+                        st.metric("Nota Fiscal", nota_formatada)
+                    with c_m3:
+                        st.metric("Valor Total da Nota", val_formatado)
 
-                    st.markdown("---")
-                    st.markdown("### 🏷️ Consulta de Maior Venda por Categoria")
-                    st.caption("Selecione uma categoria de produto para consultar qual vendedor realizou a maior venda.")
+                    with st.expander("📋 Ver Ranking das Maiores Vendas em Nota Única"):
+                        df_notas_disp = df_top_notas_s.copy()
+                        df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        st.dataframe(df_notas_disp, use_container_width=True)
+                else:
+                    st.info("Informações de nota única disponíveis na base de Acompanhamento Fortpel.")
 
-                    categorias_disponiveis = sorted([str(c).strip() for c in df_produtos_calc_s[p_cat_s].dropna().unique() if str(c).strip() != ''])
-                    if categorias_disponiveis:
-                        cat_escolhida = st.selectbox("Selecione a Categoria:", categorias_disponiveis, key="sel_cat_destaque")
-                        df_cat_filtrada = df_produtos_calc_s[df_produtos_calc_s[p_cat_s].astype(str).str.strip() == cat_escolhida]
+                st.markdown("---")
 
-                        df_ranking_cat = (
-                            df_cat_filtrada.groupby('__VEND_LIMPO', as_index=False)
-                            .agg(
-                                Total_Vendido=('__VALOR_NUM', 'sum'),
-                                Qtd_Itens=('__VALOR_NUM', 'count')
-                            )
-                            .rename(columns={'__VEND_LIMPO': 'Vendedor'})
-                            .sort_values(by='Total_Vendido', ascending=False)
-                        )
+                # ========================================================
+                # 🏷️ 2. MAIOR VENDA POR CATEGORIA SOLICITADA
+                # ========================================================
+                st.markdown("### 🏷️ Consulta de Maior Venda por Categoria Solicitada")
+                st.caption("Selecione a categoria desejada para visualizar o vendedor que fez a maior venda:")
 
-                        if not df_ranking_cat.empty:
-                            lider_cat = df_ranking_cat.iloc[0]
-                            val_lider_fmt = f"R$ {lider_cat['Total_Vendido']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-                            total_geral_cat = df_ranking_cat['Total_Vendido'].sum()
-                            total_geral_fmt = f"R$ {total_geral_cat:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                idx_cat_sel = CATEGORIAS_ROLETA.index(cat_padrao) if cat_padrao in CATEGORIAS_ROLETA else 0
+                cat_escolhida = st.selectbox(
+                    "Selecione a Categoria:",
+                    CATEGORIAS_ROLETA,
+                    index=idx_cat_sel,
+                    key="sel_cat_destaque"
+                )
 
-                            col_c1, col_c2, col_c3 = st.columns(3)
-                            with col_c1:
-                                st.metric("Vendedor Líder da Categoria", str(lider_cat['Vendedor']))
-                            with col_c2:
-                                st.metric(f"Vendido por {lider_cat['Vendedor']}", val_lider_fmt)
-                            with col_c3:
-                                st.metric("Total Geral da Categoria", total_geral_fmt)
+                if df_cat_raw_s is not None:
+                    # Calcula instantaneamente para a categoria escolhida no dropdown
+                    df_rank_escolhido, total_escolhido, df_lideres_todas = extrair_ranking_categoria(
+                        df_cat_raw=df_cat_raw_s,
+                        categoria_alvo=cat_escolhida,
+                        df_fortpel=df_fort_s,
+                        df_adm=df_adm_s
+                    )
 
-                            st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
-                            df_cat_disp = df_ranking_cat.copy()
-                            df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            st.dataframe(df_cat_disp, use_container_width=True)
+                    if not df_rank_escolhido.empty:
+                        lider_cat = df_rank_escolhido.iloc[0]
+                        val_lider_fmt = f"R$ {lider_cat['Total_Vendido']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                        total_geral_fmt = f"R$ {total_escolhido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-                    if not df_lideres_cat_s.empty:
-                        with st.expander("📊 Ver Tabela Geral de Líderes por Categoria"):
-                            df_lid_disp = df_lideres_cat_s.copy()
+                        col_c1, col_c2, col_c3 = st.columns(3)
+                        with col_c1:
+                            st.metric("Vendedor Líder da Categoria", str(lider_cat['Vendedor']))
+                        with col_c2:
+                            st.metric(f"Vendido por {lider_cat['Vendedor']}", val_lider_fmt)
+                        with col_c3:
+                            st.metric(f"Total Geral ({cat_escolhida})", total_geral_fmt)
+
+                        st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
+                        df_cat_disp = df_rank_escolhido.copy()
+                        df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        st.dataframe(df_cat_disp, use_container_width=True)
+
+                    if not df_lideres_todas.empty:
+                        with st.expander("📊 Ver Tabela Geral de Líderes das 7 Categorias"):
+                            df_lid_disp = df_lideres_todas.copy()
                             df_lid_disp['Valor_Total'] = df_lid_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                            df_lid_disp['Total_Categoria'] = df_lid_disp['Total_Categoria'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                             st.dataframe(df_lid_disp, use_container_width=True)
+                else:
+                    st.info("ℹ️ Para consultar os vendedores líderes por categoria, faça o upload da Planilha de Categorias do BI no Campo 5.")
 
             st.download_button(
-                label=f"📥 Baixar Planilha Consolidada ({qtd_abas_num} Abas) (.xlsx)",
+                label="📥 Baixar Planilha Consolidada (3 Abas) (.xlsx)",
                 data=buffer_bytes_s,
                 file_name=nome_saida_s,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
