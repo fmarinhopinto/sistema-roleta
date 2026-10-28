@@ -66,9 +66,18 @@ def buscar_arquivo_padrao(lista_arquivos, termos):
     return "Selecione..."
 
 def limpar_valor(val):
+    if pd.isna(val):
+        return 0.0
     if isinstance(val, (int, float)):
         return float(val)
-    s = str(val).replace('R$', '').replace('.', '').replace(',', '.').strip()
+    s = str(val).replace('R$', '').strip()
+    if ',' in s and '.' in s:
+        if s.rfind(',') > s.rfind('.'):
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '')
+    elif ',' in s:
+        s = s.replace(',', '.')
     return pd.to_numeric(s, errors='coerce') or 0.0
 
 def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_dt, titulo_col_id="PEDIDO", titulo_status=None):
@@ -215,9 +224,101 @@ def estilizar_aba_propostas(ws, df_resumo_adm):
     ws.column_dimensions['A'].width = max(max_len_v + 4, 22)
     ws.column_dimensions['B'].width = 12
 
+def estilizar_aba_produtos(ws, df_top_notas, df_lideres_cat):
+    """
+    Formata e preenche a Aba 3 de Destaques da Planilha de Produtos:
+    - Bloco 1: Top 10 Maiores Vendas em Nota Única
+    - Bloco 2: Líderes de Vendas por Categoria
+    """
+    fonte_titulo = Font(name="Calibri", size=13, bold=True, color="1F4E79")
+    fonte_cabecalho = Font(name="Calibri", size=11, bold=True, color="000000")
+    fill_cab_azul = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    fill_cab_amarelo = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    borda_fina = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='thin', color='D9D9D9')
+    )
+    fonte_dados = Font(name="Calibri", size=11, bold=False, color="000000")
+    fonte_destaque = Font(name="Calibri", size=11, bold=True, color="000000")
+
+    # --- BLOCO 1: TOP NOTAS ÚNICAS ---
+    ws.cell(row=1, column=1, value="🏆 TOP MAIORES VENDAS EM NOTA ÚNICA").font = fonte_titulo
+
+    headers_1 = ["POSIÇÃO", "VENDEDOR", "NOTA", "VALOR TOTAL"]
+    for idx, h in enumerate(headers_1, 1):
+        c = ws.cell(row=2, column=idx, value=h)
+        c.font = fonte_cabecalho
+        c.fill = fill_cab_azul
+        c.border = borda_fina
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    linha_atual = 3
+    for pos, r in enumerate(df_top_notas.head(10).itertuples(), start=1):
+        c_pos = ws.cell(row=linha_atual, column=1, value=f"{pos}º")
+        c_pos.alignment = Alignment(horizontal="center")
+        c_pos.font = fonte_destaque if pos == 1 else fonte_dados
+        c_pos.border = borda_fina
+
+        c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
+        c_vend.font = fonte_destaque if pos == 1 else fonte_dados
+        c_vend.border = borda_fina
+
+        nota_val = int(r.Nota) if pd.notna(r.Nota) and isinstance(r.Nota, (int, float)) and r.Nota == int(r.Nota) else str(r.Nota)
+        c_nota = ws.cell(row=linha_atual, column=3, value=nota_val)
+        c_nota.alignment = Alignment(horizontal="center")
+        c_nota.font = fonte_dados
+        c_nota.border = borda_fina
+
+        c_val = ws.cell(row=linha_atual, column=4, value=float(r.Valor_Total))
+        c_val.number_format = 'R$ #,##0.00'
+        c_val.font = fonte_destaque if pos == 1 else fonte_dados
+        c_val.border = borda_fina
+
+        linha_atual += 1
+
+    # Espaço entre blocos
+    linha_atual += 2
+
+    # --- BLOCO 2: LÍDERES POR CATEGORIA ---
+    ws.cell(row=linha_atual, column=1, value="🏷️ MAIOR VENDA POR CATEGORIA DE PRODUTO").font = fonte_titulo
+    linha_atual += 1
+
+    headers_2 = ["CATEGORIA", "VENDEDOR LÍDER", "TOTAL VENDIDO"]
+    for idx, h in enumerate(headers_2, 1):
+        c = ws.cell(row=linha_atual, column=idx, value=h)
+        c.font = fonte_cabecalho
+        c.fill = fill_cab_amarelo
+        c.border = borda_fina
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    linha_atual += 1
+    for r in df_lideres_cat.itertuples():
+        c_cat = ws.cell(row=linha_atual, column=1, value=str(r.Categoria))
+        c_cat.font = fonte_dados
+        c_cat.border = borda_fina
+
+        c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
+        c_vend.font = fonte_destaque
+        c_vend.border = borda_fina
+
+        c_val = ws.cell(row=linha_atual, column=3, value=float(r.Valor_Total))
+        c_val.number_format = 'R$ #,##0.00'
+        c_val.font = fonte_dados
+        c_val.border = borda_fina
+
+        linha_atual += 1
+
+    # Auto-ajuste de largura de colunas
+    for col in ws.columns:
+        letra = get_column_letter(col[0].column)
+        tamanho_max = max(len(str(c.value or '')) for c in col)
+        ws.column_dimensions[letra].width = max(tamanho_max + 3, 14)
+
 
 # --- SELEÇÃO / UPLOAD DOS ARQUIVOS ---
-st.subheader("1. Arquivos de Entrada (4 Bases)")
+st.subheader("1. Arquivos de Entrada (Bases BI, Fortpel, ADM e Produtos)")
 
 modo_leitura = st.radio(
     "Como deseja carregar os arquivos?",
@@ -229,6 +330,7 @@ file_novos = None
 file_reativados = None
 file_fortpel = None
 file_adm = None
+file_produtos = None
 
 if modo_leitura == "Fazer Upload pelo Navegador":
     c1, c2 = st.columns(2)
@@ -241,6 +343,7 @@ if modo_leitura == "Fazer Upload pelo Navegador":
         file_fortpel = st.file_uploader("📥 3. Acompanhamento Fortpel (Pedidos)", type=["xlsx", "xls", "csv"], key="up_fort")
     with c4:
         file_adm = st.file_uploader("📥 4. Planilha ADM (Orçamentos Efetivados)", type=["xlsx", "xls", "csv"], key="up_adm")
+    file_produtos = st.file_uploader("📥 5. Planilha de Produtos do BI (Maior Venda em Nota Única e Categorias)", type=["xlsx", "xls", "csv"], key="up_prod")
 
 else:
     # Busca tanto na pasta 'arquivos_entrada' quanto na pasta raiz do sistema
@@ -255,12 +358,13 @@ else:
         return BASE_DIR / nome
 
     if not arquivos_locais:
-        st.info(f"Nenhum arquivo encontrado em `{PASTA_ENTRADA}` ou `{BASE_DIR}`. Coloque as 4 planilhas lá ou use a opção de Upload.")
+        st.info(f"Nenhum arquivo encontrado em `{PASTA_ENTRADA}` ou `{BASE_DIR}`. Coloque as planilhas lá ou use a opção de Upload.")
     else:
         padrao_novos = buscar_arquivo_padrao(arquivos_locais, ["novo"])
         padrao_reat = buscar_arquivo_padrao(arquivos_locais, ["reativ"])
         padrao_fort = buscar_arquivo_padrao(arquivos_locais, ["acomp", "fortpel"])
         padrao_adm = buscar_arquivo_padrao(arquivos_locais, ["adm", "orcamento", "proposta"])
+        padrao_prod = buscar_arquivo_padrao(arquivos_locais, ["prod", "item", "data", "venda"])
 
         c1, c2 = st.columns(2)
         c3, c4 = st.columns(2)
@@ -290,23 +394,38 @@ else:
             if nome_a != "Selecione...":
                 file_adm = resolver_caminho(nome_a)
 
+        idx_p = opcoes.index(padrao_prod) if padrao_prod in opcoes else 0
+        nome_p = st.selectbox("5. Planilha de Produtos do BI (Destaques e Categorias):", opcoes, index=idx_p, key="loc_prod")
+        if nome_p != "Selecione...":
+            file_produtos = resolver_caminho(nome_p)
+
 
 # --- MAPEAMENTO E PROCESSAMENTO ---
 if file_novos and file_reativados and file_fortpel and file_adm:
     try:
-        with st.spinner("Lendo os 4 arquivos Excel/CSV..."):
+        with st.spinner("Lendo arquivos Excel/CSV..."):
             df_novos_raw = carregar_dados(file_novos)
             df_reativados_raw = carregar_dados(file_reativados)
             df_fortpel_raw = carregar_dados(file_fortpel)
             df_adm_raw = carregar_dados(file_adm)
+            df_produtos_raw = carregar_dados(file_produtos) if file_produtos else None
     except Exception as e:
         st.error(f"Erro ao ler arquivos: {e}")
         st.stop()
 
-    st.success("As 4 bases foram carregadas com sucesso!")
+    qtd_bases = 5 if df_produtos_raw is not None else 4
+    st.success(f"As {qtd_bases} bases foram carregadas com sucesso!")
 
     st.subheader("2. Mapeamento das Colunas Chave")
-    tab_bi, tab_fortpel, tab_adm = st.tabs(["Bases do BI", "Acompanhamento Fortpel", "Planilha ADM (Orçamentos)"])
+    titulos_abas_map = ["Bases do BI", "Acompanhamento Fortpel", "Planilha ADM (Orçamentos)"]
+    if df_produtos_raw is not None:
+        titulos_abas_map.append("Planilha de Produtos (BI)")
+
+    abas_mapeamento = st.tabs(titulos_abas_map)
+    tab_bi = abas_mapeamento[0]
+    tab_fortpel = abas_mapeamento[1]
+    tab_adm = abas_mapeamento[2]
+    tab_prod = abas_mapeamento[3] if df_produtos_raw is not None else None
 
     with tab_bi:
         c_b1, c_b2 = st.columns(2)
@@ -368,6 +487,33 @@ if file_novos and file_reativados and file_fortpel and file_adm:
             help="Selecione quais status entram na contagem. Por padrão, todos os status presentes na planilha são contabilizados."
         )
 
+    col_p_vend = None
+    col_p_nota = None
+    col_p_val = None
+    col_p_cat = None
+    if tab_prod is not None:
+        with tab_prod:
+            st.markdown("📦 **Planilha de Produtos do BI (Destaques e Categorias)**")
+            st.caption("Identifique as colunas para cálculo da maior venda em nota única e líderes por categoria.")
+            c_p1, c_p2 = st.columns(2)
+            c_p3, c_p4 = st.columns(2)
+            with c_p1:
+                col_padrao_v = identificar_coluna(df_produtos_raw.columns, ["vendedor", "operador", "gestor", "representante"])
+                idx_pv = df_produtos_raw.columns.get_loc(col_padrao_v) if col_padrao_v in df_produtos_raw.columns else 0
+                col_p_vend = st.selectbox("Coluna Vendedor (Produtos):", df_produtos_raw.columns, index=idx_pv)
+            with c_p2:
+                col_padrao_n = identificar_coluna(df_produtos_raw.columns, ["n_nota_obs", "nota", "nf", "pedido", "numero"])
+                idx_pn = df_produtos_raw.columns.get_loc(col_padrao_n) if col_padrao_n in df_produtos_raw.columns else 0
+                col_p_nota = st.selectbox("Coluna Nota Fiscal / Pedido (Produtos):", df_produtos_raw.columns, index=idx_pn)
+            with c_p3:
+                col_padrao_val = identificar_coluna(df_produtos_raw.columns, ["vendas total", "venda total", "venda", "valor total", "valor", "total", "preco"])
+                idx_pval = df_produtos_raw.columns.get_loc(col_padrao_val) if col_padrao_val in df_produtos_raw.columns else 0
+                col_p_val = st.selectbox("Coluna Valor da Venda (Produtos):", df_produtos_raw.columns, index=idx_pval)
+            with c_p4:
+                col_padrao_cat = identificar_coluna(df_produtos_raw.columns, ["categoria", "grupo", "linha", "subgrupo", "familia", "descr. produto", "descricao", "produto"])
+                idx_pcat = df_produtos_raw.columns.get_loc(col_padrao_cat) if col_padrao_cat in df_produtos_raw.columns else 0
+                col_p_cat = st.selectbox("Coluna Categoria / Produto:", df_produtos_raw.columns, index=idx_pcat)
+
     # Conversão de Datas (Apenas Fortpel requer data)
     df_fortpel = df_fortpel_raw.copy()
     df_fortpel['__DATA_DT'] = pd.to_datetime(df_fortpel[col_f_data], dayfirst=True, errors='coerce')
@@ -411,7 +557,7 @@ if file_novos and file_reativados and file_fortpel and file_adm:
         dt_inicio, dt_fim = data_sel
 
         if st.button("🚀 Processar e Gerar Planilha Completa", type="primary"):
-            with st.spinner("Processando cruzamentos das 2 abas..."):
+            with st.spinner("Processando cruzamentos das bases..."):
                 # ==========================================
                 # ABA 1: REATIVADOS - NOVOS
                 # ==========================================
@@ -438,27 +584,22 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 mask_status = df_fortpel['STATUS'].astype(str).str.upper().isin(status_validos)
 
                 if "Sem restrição" in modo_filtro_roleta:
-                    # Sem restrição de data de início, mas limita até a data fim (não puxa compras futuras)
                     mask_data_f = (df_fortpel['__DATA_DT'].dt.date <= dt_fim) if pd.notna(dt_fim) else True
                     df_aba1 = df_fortpel[mask_data_f & mask_status].copy()
                 else:
-                    # FILTRAR POR PERÍODO INCLUSIVO
                     mask_data_f = (df_fortpel['__DATA_DT'].dt.date >= dt_inicio) & (df_fortpel['__DATA_DT'].dt.date <= dt_fim)
                     df_aba1 = df_fortpel[mask_data_f & mask_status].copy()
 
-                    # Fallback inteligente: se o filtro estrito não encontrou nada, mas os clientes do BI existem na base
                     if df_aba1.empty and mask_status.sum() > 0:
                         mask_data_f_flex = (df_fortpel['__DATA_DT'].dt.date <= dt_fim) if pd.notna(dt_fim) else True
                         df_aba1 = df_fortpel[mask_data_f_flex & mask_status].copy()
                         if not df_aba1.empty:
                             st.warning(f"⚠️ Atenção: Não foram encontrados pedidos exatamente no intervalo selecionado ({dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}), mas os clientes foram localizados na base. Os pedidos foram recuperados considerando os registros até a data limite!")
 
-                # Desduplicação por Cliente Único (Padrão BI) se selecionado
                 if "Cliente Único" in criterio_roleta:
                     df_aba1 = df_aba1.sort_values(by=['__DATA_DT', col_f_ped], ascending=[True, True])
                     df_aba1 = df_aba1.drop_duplicates(subset=['__CLI_NORM'], keep='first')
 
-                # Mapa de valores do BI se selecionado
                 if "BI" in origem_valor_aba1:
                     mapa_valores_bi = {}
                     if col_novos_val:
@@ -471,9 +612,7 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 else:
                     df_aba1['VALOR_NUM'] = df_aba1[col_f_val].apply(limpar_valor)
 
-                # ========================================================
-                # REGRA: VERIFICAR OUTRO PEDIDO NO MESMO MÊS DO PERÍODO
-                # ========================================================
+                # Regra Duas Compras
                 meses_periodo = set(pd.date_range(dt_inicio, dt_fim).to_period('M'))
                 mask_meses_f = df_fortpel['__DATA_DT'].dt.to_period('M').isin(meses_periodo)
                 pedidos_no_mes = df_fortpel[mask_meses_f].groupby('__CLI_NORM')[col_f_ped].nunique().to_dict()
@@ -508,72 +647,203 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 df_aba2.columns = ['Vendedor', 'Qtd']
                 df_aba2 = df_aba2.sort_values(by=['Qtd', 'Vendedor'], ascending=[False, True])
 
-                # Dataframes finais oficiais de cada aba:
-                df_roleta_novos_reativados = df_aba1
-                df_propostas = df_aba2
+                # ==========================================
+                # ABA 3: PRODUTOS BI (DESTAQUES & CATEGORIAS)
+                # ==========================================
+                df_top_notas = pd.DataFrame()
+                df_lideres_cat = pd.DataFrame()
+                df_produtos_calc = pd.DataFrame()
+
+                if df_produtos_raw is not None and col_p_nota and col_p_vend and col_p_val and col_p_cat:
+                    df_produtos_calc = df_produtos_raw.dropna(subset=[col_p_nota, col_p_vend, col_p_val]).copy()
+                    df_produtos_calc['__VALOR_NUM'] = df_produtos_calc[col_p_val].apply(limpar_valor)
+                    df_produtos_calc['__VEND_LIMPO'] = df_produtos_calc[col_p_vend].astype(str).str.strip().str.upper()
+
+                    # 1. Maior venda em uma única nota
+                    df_top_notas = (
+                        df_produtos_calc.groupby([col_p_nota, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
+                        .sum()
+                        .rename(columns={col_p_nota: 'Nota', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
+                        .sort_values(by='Valor_Total', ascending=False)
+                    )
+
+                    # 2. Líderes por Categoria
+                    df_cat_totais = (
+                        df_produtos_calc.groupby([col_p_cat, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
+                        .sum()
+                        .rename(columns={col_p_cat: 'Categoria', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
+                        .sort_values(by=['Categoria', 'Valor_Total'], ascending=[True, False])
+                    )
+                    df_lideres_cat = df_cat_totais.drop_duplicates(subset=['Categoria'], keep='first').sort_values(by='Valor_Total', ascending=False)
 
                 # ==========================================
-                # GERAÇÃO DO WORKBOOK COM AS DUAS ABAS
+                # GERAÇÃO DO WORKBOOK
                 # ==========================================
                 wb = openpyxl.Workbook()
 
-                # Nome das abas dinâmicas mantendo as datas selecionadas
                 dia_i = dt_inicio.strftime('%d')
                 dia_f = dt_fim.strftime('%d')
                 nome_aba1 = f"{dia_i}-{dia_f} Reativados - Novos"[:31]
                 nome_aba2 = f"{dia_i}-{dia_f} Propostas Enviadas"[:31]
 
-                # Preencher Aba 1 (df_roleta_novos_reativados)
+                # Preencher Aba 1
                 ws1 = wb.active
                 ws1.title = nome_aba1
-
-                if not df_roleta_novos_reativados.empty:
-                    df_roleta_novos_reativados['VENDEDOR_CLEAN'] = df_roleta_novos_reativados[col_f_vend].astype(str).str.strip().str.upper()
-                    df_roleta_novos_reativados = df_roleta_novos_reativados.sort_values(by=['VENDEDOR_CLEAN', '__DATA_DT', col_f_cli])
-                    estilizar_aba(ws1, df_roleta_novos_reativados, col_f_ped, col_f_val, col_f_cli, '__DATA_DT', titulo_col_id="PEDIDO")
+                if not df_aba1.empty:
+                    df_aba1['VENDEDOR_CLEAN'] = df_aba1[col_f_vend].astype(str).str.strip().str.upper()
+                    df_aba1 = df_aba1.sort_values(by=['VENDEDOR_CLEAN', '__DATA_DT', col_f_cli])
+                    estilizar_aba(ws1, df_aba1, col_f_ped, col_f_val, col_f_cli, '__DATA_DT', titulo_col_id="PEDIDO")
                 else:
                     ws1.cell(row=1, column=1, value="Nenhum pedido encontrado para Novos/Reativados no período.")
 
-                # Preencher Aba 2 (df_propostas - Tabela Dinâmica Vendedor x Qtd)
+                # Preencher Aba 2
                 ws2 = wb.create_sheet(title=nome_aba2)
-
-                if not df_propostas.empty:
-                    estilizar_aba_propostas(ws2, df_propostas)
+                if not df_aba2.empty:
+                    estilizar_aba_propostas(ws2, df_aba2)
                 else:
                     ws2.cell(row=1, column=1, value="Nenhum registro encontrado na planilha ADM.")
 
-                # Salvar na pasta planilhas_geradas
+                # Preencher Aba 3 (se houver dados de produtos)
+                if df_produtos_raw is not None and not df_top_notas.empty:
+                    ws3 = wb.create_sheet(title="Destaques Produtos BI")
+                    estilizar_aba_produtos(ws3, df_top_notas, df_lideres_cat)
+
                 nome_arquivo_saida = f"Controle_roleta_{dt_inicio.strftime('%d%m')}_a_{dt_fim.strftime('%d%m')}.xlsx"
                 caminho_salvar_local = PASTA_SAIDA / nome_arquivo_saida
                 wb.save(caminho_salvar_local)
 
-                # Buffer para Download
                 buffer_download = io.BytesIO()
                 wb.save(buffer_download)
                 buffer_download.seek(0)
 
-                st.success("✅ Planilha gerada com as duas abas com sucesso!")
-                st.info(f"📁 Arquivo salvo em: `{caminho_salvar_local}`")
+                # Salva no Session State para manter persistente entre seleções
+                st.session_state['processado'] = True
+                st.session_state['df_aba1'] = df_aba1
+                st.session_state['df_aba2'] = df_aba2
+                st.session_state['df_top_notas'] = df_top_notas
+                st.session_state['df_lideres_cat'] = df_lideres_cat
+                st.session_state['df_produtos_calc'] = df_produtos_calc
+                st.session_state['col_p_cat'] = col_p_cat
+                st.session_state['col_p_vend'] = col_p_vend
+                st.session_state['col_f_ped'] = col_f_ped
+                st.session_state['col_f_cli'] = col_f_cli
+                st.session_state['nome_aba1'] = nome_aba1
+                st.session_state['nome_aba2'] = nome_aba2
+                st.session_state['caminho_salvar_local'] = caminho_salvar_local
+                st.session_state['buffer_bytes'] = buffer_download.getvalue()
+                st.session_state['nome_arquivo_saida'] = nome_arquivo_saida
+                st.session_state['tem_produtos'] = (df_produtos_raw is not None and not df_top_notas.empty)
 
-                t1, t2 = st.tabs([f"Aba 1: {nome_aba1}", f"Aba 2: {nome_aba2}"])
-                with t1:
-                    if not df_aba1.empty:
-                        qtd_duas_compras = int(df_aba1['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1 else 0
-                        if qtd_duas_compras > 0:
-                            st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
-                        st.dataframe(df_aba1[['VENDEDOR_CLEAN', col_f_ped, col_f_cli, 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
-                    else:
-                        st.write("Sem registros no período para a Aba 1.")
-                with t2:
-                    if not df_aba2.empty:
-                        st.dataframe(df_aba2, use_container_width=True)
-                        st.metric("Total de Propostas Efetivadas", int(df_aba2['Qtd'].sum()))
-                    else:
-                        st.write("Sem registros na planilha ADM.")
+        # Exibição dos Resultados (Persistente no Session State)
+        if st.session_state.get('processado', False):
+            df_aba1_s = st.session_state['df_aba1']
+            df_aba2_s = st.session_state['df_aba2']
+            nome_aba1_s = st.session_state['nome_aba1']
+            nome_aba2_s = st.session_state['nome_aba2']
+            caminho_local_s = st.session_state['caminho_salvar_local']
+            buffer_bytes_s = st.session_state['buffer_bytes']
+            nome_saida_s = st.session_state['nome_arquivo_saida']
+            tem_prod_s = st.session_state.get('tem_produtos', False)
 
-                st.download_button(
-                    label="📥 Baixar Planilha Consolidada (2 Abas) (.xlsx)",
-                    data=buffer_download,
-                    file_name=nome_arquivo_saida,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            qtd_abas_num = 3 if tem_prod_s else 2
+            st.success(f"✅ Planilha gerada com {qtd_abas_num} abas com sucesso!")
+            st.info(f"📁 Arquivo salvo em: `{caminho_local_s}`")
+
+            abas_titulos = [f"Aba 1: {nome_aba1_s}", f"Aba 2: {nome_aba2_s}"]
+            if tem_prod_s:
+                abas_titulos.append("Aba 3: 📦 Destaques Produtos BI")
+
+            abas_res = st.tabs(abas_titulos)
+
+            with abas_res[0]:
+                if not df_aba1_s.empty:
+                    qtd_duas_compras = int(df_aba1_s['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1_s else 0
+                    if qtd_duas_compras > 0:
+                        st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
+                    st.dataframe(df_aba1_s[['VENDEDOR_CLEAN', st.session_state['col_f_ped'], st.session_state['col_f_cli'], 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
+                else:
+                    st.write("Sem registros no período para a Aba 1.")
+
+            with abas_res[1]:
+                if not df_aba2_s.empty:
+                    st.dataframe(df_aba2_s, use_container_width=True)
+                    st.metric("Total de Propostas Efetivadas", int(df_aba2_s['Qtd'].sum()))
+                else:
+                    st.write("Sem registros na planilha ADM.")
+
+            if tem_prod_s and len(abas_res) > 2:
+                with abas_res[2]:
+                    df_top_notas_s = st.session_state['df_top_notas']
+                    df_lideres_cat_s = st.session_state['df_lideres_cat']
+                    df_produtos_calc_s = st.session_state['df_produtos_calc']
+                    p_cat_s = st.session_state['col_p_cat']
+
+                    st.markdown("### 🏆 Maior Venda em Nota Única")
+                    if not df_top_notas_s.empty:
+                        top1_nota = df_top_notas_s.iloc[0]
+                        nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
+                        val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+                        c_m1, c_m2, c_m3 = st.columns(3)
+                        with c_m1:
+                            st.metric("Vendedor Campeão (Nota Única)", str(top1_nota['Vendedor']))
+                        with c_m2:
+                            st.metric("Nota Fiscal", nota_formatada)
+                        with c_m3:
+                            st.metric("Valor Total da Nota", val_formatado)
+
+                        with st.expander("📋 Ver Ranking das Maiores Vendas em Nota Única"):
+                            df_notas_disp = df_top_notas_s.copy()
+                            df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                            st.dataframe(df_notas_disp, use_container_width=True)
+
+                    st.markdown("---")
+                    st.markdown("### 🏷️ Consulta de Maior Venda por Categoria")
+                    st.caption("Selecione uma categoria de produto para consultar qual vendedor realizou a maior venda.")
+
+                    categorias_disponiveis = sorted([str(c).strip() for c in df_produtos_calc_s[p_cat_s].dropna().unique() if str(c).strip() != ''])
+                    if categorias_disponiveis:
+                        cat_escolhida = st.selectbox("Selecione a Categoria:", categorias_disponiveis, key="sel_cat_destaque")
+                        df_cat_filtrada = df_produtos_calc_s[df_produtos_calc_s[p_cat_s].astype(str).str.strip() == cat_escolhida]
+
+                        df_ranking_cat = (
+                            df_cat_filtrada.groupby('__VEND_LIMPO', as_index=False)
+                            .agg(
+                                Total_Vendido=('__VALOR_NUM', 'sum'),
+                                Qtd_Itens=('__VALOR_NUM', 'count')
+                            )
+                            .rename(columns={'__VEND_LIMPO': 'Vendedor'})
+                            .sort_values(by='Total_Vendido', ascending=False)
+                        )
+
+                        if not df_ranking_cat.empty:
+                            lider_cat = df_ranking_cat.iloc[0]
+                            val_lider_fmt = f"R$ {lider_cat['Total_Vendido']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                            total_geral_cat = df_ranking_cat['Total_Vendido'].sum()
+                            total_geral_fmt = f"R$ {total_geral_cat:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+                            col_c1, col_c2, col_c3 = st.columns(3)
+                            with col_c1:
+                                st.metric("Vendedor Líder da Categoria", str(lider_cat['Vendedor']))
+                            with col_c2:
+                                st.metric(f"Vendido por {lider_cat['Vendedor']}", val_lider_fmt)
+                            with col_c3:
+                                st.metric("Total Geral da Categoria", total_geral_fmt)
+
+                            st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
+                            df_cat_disp = df_ranking_cat.copy()
+                            df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                            st.dataframe(df_cat_disp, use_container_width=True)
+
+                    if not df_lideres_cat_s.empty:
+                        with st.expander("📊 Ver Tabela Geral de Líderes por Categoria"):
+                            df_lid_disp = df_lideres_cat_s.copy()
+                            df_lid_disp['Valor_Total'] = df_lid_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                            st.dataframe(df_lid_disp, use_container_width=True)
+
+            st.download_button(
+                label=f"📥 Baixar Planilha Consolidada ({qtd_abas_num} Abas) (.xlsx)",
+                data=buffer_bytes_s,
+                file_name=nome_saida_s,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
