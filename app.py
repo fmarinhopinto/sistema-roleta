@@ -121,6 +121,15 @@ def limpar_valor(val):
         s = s.replace(',', '.')
     return pd.to_numeric(s, errors='coerce') or 0.0
 
+def obter_id_arquivo(f):
+    if f is None:
+        return ""
+    if hasattr(f, 'name') and hasattr(f, 'size'):
+        return f"{f.name}_{f.size}"
+    if isinstance(f, (str, Path)):
+        return str(f)
+    return str(f)
+
 def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_dt, titulo_col_id="PEDIDO", titulo_status=None):
     fonte_cabecalho = Font(name="Calibri", size=11, bold=True, color="000000")
     fill_cabecalho = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
@@ -580,8 +589,15 @@ def extrair_maior_venda_nota(df_fortpel, col_nota, col_vend, col_val, dt_inicio=
 
 def carregar_planilha_ajustada(arquivo):
     xl = pd.ExcelFile(arquivo)
-    res = {}
+    res = {
+        'df_aba1': pd.DataFrame(),
+        'df_aba2': pd.DataFrame(),
+        'df_top_notas': pd.DataFrame(),
+        'df_cats': pd.DataFrame(),
+        'df_lideres_cat': pd.DataFrame()
+    }
 
+    # 1. ABA 1: NOVOS E REATIVADOS
     s1 = None
     for s in xl.sheet_names:
         if any(term in s.lower() for term in ['reativad', 'novo', 'aba 1']):
@@ -610,6 +626,7 @@ def carregar_planilha_ajustada(arquivo):
         res['df_aba1'] = df1_clean
         res['nome_aba1'] = s1
 
+    # 2. ABA 2: PROPOSTAS ENVIADAS
     s2 = None
     for s in xl.sheet_names:
         if any(term in s.lower() for term in ['proposta', 'adm', 'aba 2']):
@@ -626,6 +643,74 @@ def carregar_planilha_ajustada(arquivo):
             df2_clean['Qtd'] = pd.to_numeric(df2_clean['Qtd'], errors='coerce').fillna(0).astype(int)
             res['df_aba2'] = df2_clean
             res['nome_aba2'] = s2
+
+    # 3. ABA 3: DESTAQUES ROLETA (TOP NOTAS E MAIORES VENDAS POR CATEGORIA)
+    s3 = None
+    for s in xl.sheet_names:
+        if any(term in s.lower() for term in ['destaque', 'roleta', 'aba 3', 'produtos', 'categoria']):
+            s3 = s
+            break
+    if s3:
+        try:
+            df3 = pd.read_excel(arquivo, sheet_name=s3, header=None)
+            notas = []
+            cats = []
+            lendo_notas = False
+            lendo_cat = False
+
+            for idx, row in df3.iterrows():
+                vals = [str(x).strip() for x in row.dropna().tolist()]
+                if not vals:
+                    continue
+                linha_str = " ".join(vals).upper()
+
+                if "TOP MAIORES VENDAS" in linha_str or "NOTA UNICA" in linha_str or "NOTA ÚNICA" in linha_str:
+                    lendo_notas = True
+                    lendo_cat = False
+                    continue
+
+                if "CATEGORIA DE PRODUTO" in linha_str or "MAIOR VENDA POR CATEGORIA" in linha_str:
+                    lendo_cat = True
+                    lendo_notas = False
+                    continue
+
+                if lendo_notas:
+                    if "POSI" in linha_str and "VENDEDOR" in linha_str:
+                        continue
+                    if len(row) >= 4 and pd.notna(row[1]) and pd.notna(row[3]):
+                        try:
+                            val_num = limpar_valor(row[3])
+                            if val_num > 0:
+                                notas.append({
+                                    'Vendedor': str(row[1]).strip().upper(),
+                                    'Nota': row[2],
+                                    'Valor_Total': val_num
+                                })
+                        except Exception:
+                            pass
+
+                if lendo_cat:
+                    if "CATEGORIA" in linha_str and "VENDEDOR" in linha_str:
+                        continue
+                    if len(row) >= 3 and pd.notna(row[0]) and pd.notna(row[1]) and pd.notna(row[2]):
+                        try:
+                            val_num = limpar_valor(row[2])
+                            if val_num > 0:
+                                cats.append({
+                                    'Categoria': str(row[0]).strip().upper(),
+                                    'Vendedor': str(row[1]).strip().upper(),
+                                    'Total_Vendido': val_num,
+                                    'Valor_Total': val_num
+                                })
+                        except Exception:
+                            pass
+
+            res['df_top_notas'] = pd.DataFrame(notas)
+            res['df_cats'] = pd.DataFrame(cats)
+            res['df_lideres_cat'] = pd.DataFrame(cats)
+            res['nome_aba3'] = s3
+        except Exception as e:
+            print(f"Erro ao ler Aba 3 da planilha ajustada: {e}")
 
     return res
 
@@ -841,6 +926,9 @@ def modal_upload_ajustada():
                 with open(caminho_fra_disk, "wb") as f_out:
                     f_out.write(file_fra.getvalue())
 
+                df_top_fra = dados_fra.get('df_top_notas', pd.DataFrame())
+                df_cats_fra = dados_fra.get('df_cats', pd.DataFrame())
+
                 # Atualiza objeto de persistência
                 existente_fra = carregar_dados_operador("FRANCINE") or {}
                 existente_fra.update({
@@ -849,11 +937,16 @@ def modal_upload_ajustada():
                     'usando_ajustada': True,
                     'df_aba1': dados_fra['df_aba1'],
                     'df_aba2': dados_fra.get('df_aba2', pd.DataFrame()),
+                    'df_top_notas': df_top_fra,
+                    'df_cats': df_cats_fra,
+                    'df_lideres_cat': df_cats_fra,
                     'nome_arquivo_ajustada': file_fra.name
                 })
                 salvar_dados_operador("FRANCINE", existente_fra)
                 st.session_state['df_aba1_francine_ajustada'] = dados_fra['df_aba1']
                 st.session_state['df_aba2_francine_ajustada'] = dados_fra.get('df_aba2', pd.DataFrame())
+                st.session_state['df_top_francine_ajustada'] = df_top_fra
+                st.session_state['df_cats_francine_ajustada'] = df_cats_fra
                 st.success(f"✅ Francine: {len(dados_fra['df_aba1'])} clientes carregados e sincronizados!")
 
         fra_disco = carregar_dados_operador("FRANCINE")
@@ -863,6 +956,8 @@ def modal_upload_ajustada():
                 limpar_dados_operador("FRANCINE")
                 st.session_state.pop('df_aba1_francine_ajustada', None)
                 st.session_state.pop('df_aba2_francine_ajustada', None)
+                st.session_state.pop('df_top_francine_ajustada', None)
+                st.session_state.pop('df_cats_francine_ajustada', None)
                 st.rerun()
 
     with col_u2:
@@ -875,6 +970,9 @@ def modal_upload_ajustada():
                 with open(caminho_fil_disk, "wb") as f_out:
                     f_out.write(file_fil.getvalue())
 
+                df_top_fil = dados_fil.get('df_top_notas', pd.DataFrame())
+                df_cats_fil = dados_fil.get('df_cats', pd.DataFrame())
+
                 existente_fil = carregar_dados_operador("FILIPE") or {}
                 existente_fil.update({
                     'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
@@ -882,11 +980,16 @@ def modal_upload_ajustada():
                     'usando_ajustada': True,
                     'df_aba1': dados_fil['df_aba1'],
                     'df_aba2': dados_fil.get('df_aba2', pd.DataFrame()),
+                    'df_top_notas': df_top_fil,
+                    'df_cats': df_cats_fil,
+                    'df_lideres_cat': df_cats_fil,
                     'nome_arquivo_ajustada': file_fil.name
                 })
                 salvar_dados_operador("FILIPE", existente_fil)
                 st.session_state['df_aba1_filipe_ajustada'] = dados_fil['df_aba1']
                 st.session_state['df_aba2_filipe_ajustada'] = dados_fil.get('df_aba2', pd.DataFrame())
+                st.session_state['df_top_filipe_ajustada'] = df_top_fil
+                st.session_state['df_cats_filipe_ajustada'] = df_cats_fil
                 st.success(f"✅ Filipe: {len(dados_fil['df_aba1'])} clientes carregados e sincronizados!")
 
         fil_disco = carregar_dados_operador("FILIPE")
@@ -896,6 +999,8 @@ def modal_upload_ajustada():
                 limpar_dados_operador("FILIPE")
                 st.session_state.pop('df_aba1_filipe_ajustada', None)
                 st.session_state.pop('df_aba2_filipe_ajustada', None)
+                st.session_state.pop('df_top_filipe_ajustada', None)
+                st.session_state.pop('df_cats_filipe_ajustada', None)
                 st.rerun()
 
     st.markdown("---")
@@ -915,6 +1020,9 @@ def modal_resultados_finais():
     df_top_fra = disco_fra.get('df_top_notas', pd.DataFrame())
     df_cat_fra = disco_fra.get('df_categorias_raw')
     df_rank_cat_fra = disco_fra.get('df_rank_cat', pd.DataFrame())
+    df_cats_fra = disco_fra.get('df_lideres_cat')
+    if df_cats_fra is None or (isinstance(df_cats_fra, pd.DataFrame) and df_cats_fra.empty):
+        df_cats_fra = disco_fra.get('df_cats', pd.DataFrame())
     fra_usando_ajustada = bool(disco_fra.get('usando_ajustada'))
 
     # Fallback para session_state local se não estiver no disco
@@ -922,6 +1030,33 @@ def modal_resultados_finais():
         df1_fra = st.session_state.get('df_aba1_francine_ajustada') or st.session_state.get('df_aba1_francine')
     if df2_fra is None:
         df2_fra = st.session_state.get('df_aba2_francine_ajustada') or st.session_state.get('df_aba2_francine')
+    if (df_top_fra is None or df_top_fra.empty) and 'df_top_francine_ajustada' in st.session_state:
+        df_top_fra = st.session_state.get('df_top_francine_ajustada', pd.DataFrame())
+    if (df_cats_fra is None or df_cats_fra.empty) and 'df_cats_francine_ajustada' in st.session_state:
+        df_cats_fra = st.session_state.get('df_cats_francine_ajustada', pd.DataFrame())
+
+    # Auto-recuperação da Aba 3 de Francine se notas ou categorias estiverem vazias
+    caminho_fra_aj = PASTA_STORAGE / "francine_ajustada.xlsx"
+    if (df_top_fra is None or df_top_fra.empty or df_cats_fra is None or df_cats_fra.empty) and caminho_fra_aj.exists():
+        try:
+            d_extra_fra = carregar_planilha_ajustada(caminho_fra_aj)
+            if (df_top_fra is None or df_top_fra.empty) and not d_extra_fra.get('df_top_notas', pd.DataFrame()).empty:
+                df_top_fra = d_extra_fra['df_top_notas']
+            if (df_cats_fra is None or df_cats_fra.empty) and not d_extra_fra.get('df_cats', pd.DataFrame()).empty:
+                df_cats_fra = d_extra_fra['df_cats']
+        except Exception:
+            pass
+    elif (df_top_fra is None or df_top_fra.empty or df_cats_fra is None or df_cats_fra.empty) and disco_fra.get('caminho_salvar_local'):
+        p_fra_local = Path(disco_fra.get('caminho_salvar_local'))
+        if p_fra_local.exists():
+            try:
+                d_extra_fra = carregar_planilha_ajustada(p_fra_local)
+                if (df_top_fra is None or df_top_fra.empty) and not d_extra_fra.get('df_top_notas', pd.DataFrame()).empty:
+                    df_top_fra = d_extra_fra['df_top_notas']
+                if (df_cats_fra is None or df_cats_fra.empty) and not d_extra_fra.get('df_cats', pd.DataFrame()).empty:
+                    df_cats_fra = d_extra_fra['df_cats']
+            except Exception:
+                pass
 
     # 2. Recupera dados de FILIPE diretamente do disco sincronizado
     disco_fil = carregar_dados_operador("FILIPE") or {}
@@ -930,15 +1065,45 @@ def modal_resultados_finais():
     df_top_fil = disco_fil.get('df_top_notas', pd.DataFrame())
     df_cat_fil = disco_fil.get('df_categorias_raw')
     df_rank_cat_fil = disco_fil.get('df_rank_cat', pd.DataFrame())
+    df_cats_fil = disco_fil.get('df_lideres_cat')
+    if df_cats_fil is None or (isinstance(df_cats_fil, pd.DataFrame) and df_cats_fil.empty):
+        df_cats_fil = disco_fil.get('df_cats', pd.DataFrame())
     fil_usando_ajustada = bool(disco_fil.get('usando_ajustada'))
 
     if df1_fil is None:
         df1_fil = st.session_state.get('df_aba1_filipe_ajustada') or st.session_state.get('df_aba1_filipe')
     if df2_fil is None:
         df2_fil = st.session_state.get('df_aba2_filipe_ajustada') or st.session_state.get('df_aba2_filipe')
+    if (df_top_fil is None or df_top_fil.empty) and 'df_top_filipe_ajustada' in st.session_state:
+        df_top_fil = st.session_state.get('df_top_filipe_ajustada', pd.DataFrame())
+    if (df_cats_fil is None or df_cats_fil.empty) and 'df_cats_filipe_ajustada' in st.session_state:
+        df_cats_fil = st.session_state.get('df_cats_filipe_ajustada', pd.DataFrame())
 
-    tem_dados_fra = (df1_fra is not None and not df1_fra.empty) or (df2_fra is not None and not df2_fra.empty)
-    tem_dados_fil = (df1_fil is not None and not df1_fil.empty) or (df2_fil is not None and not df2_fil.empty)
+    # Auto-recuperação da Aba 3 de Filipe se notas ou categorias estiverem vazias
+    caminho_fil_aj = PASTA_STORAGE / "filipe_ajustada.xlsx"
+    if (df_top_fil is None or df_top_fil.empty or df_cats_fil is None or df_cats_fil.empty) and caminho_fil_aj.exists():
+        try:
+            d_extra_fil = carregar_planilha_ajustada(caminho_fil_aj)
+            if (df_top_fil is None or df_top_fil.empty) and not d_extra_fil.get('df_top_notas', pd.DataFrame()).empty:
+                df_top_fil = d_extra_fil['df_top_notas']
+            if (df_cats_fil is None or df_cats_fil.empty) and not d_extra_fil.get('df_cats', pd.DataFrame()).empty:
+                df_cats_fil = d_extra_fil['df_cats']
+        except Exception:
+            pass
+    elif (df_top_fil is None or df_top_fil.empty or df_cats_fil is None or df_cats_fil.empty) and disco_fil.get('caminho_salvar_local'):
+        p_fil_local = Path(disco_fil.get('caminho_salvar_local'))
+        if p_fil_local.exists():
+            try:
+                d_extra_fil = carregar_planilha_ajustada(p_fil_local)
+                if (df_top_fil is None or df_top_fil.empty) and not d_extra_fil.get('df_top_notas', pd.DataFrame()).empty:
+                    df_top_fil = d_extra_fil['df_top_notas']
+                if (df_cats_fil is None or df_cats_fil.empty) and not d_extra_fil.get('df_cats', pd.DataFrame()).empty:
+                    df_cats_fil = d_extra_fil['df_cats']
+            except Exception:
+                pass
+
+    tem_dados_fra = (df1_fra is not None and not df1_fra.empty) or (df2_fra is not None and not df2_fra.empty) or (df_top_fra is not None and not df_top_fra.empty)
+    tem_dados_fil = (df1_fil is not None and not df1_fil.empty) or (df2_fil is not None and not df2_fil.empty) or (df_top_fil is not None and not df_top_fil.empty)
 
     if not (tem_dados_fra or tem_dados_fil):
         st.warning("⚠️ Atenção: Nenhuma planilha foi gerada ou enviada ainda. Por favor, processe as planilhas nos painéis abaixo ou faça o upload das planilhas ajustadas no botão **'UPLOAD DE PLANILHA AJUSTADA'**.")
@@ -982,13 +1147,41 @@ def modal_resultados_finais():
             .reset_index(drop=True)
         )
 
-    # 3. MAIOR PEDIDO FATURADO
-    df_notas_comb = pd.concat([df_top_fra, df_top_fil], ignore_index=True)
+    # 3. MAIOR PEDIDO FATURADO (CRUZAMENTO DE NOTAS DE AMBOS OS OPERADORES)
+    list_top = []
+    if df_top_fra is not None and not df_top_fra.empty:
+        t_fra = df_top_fra.copy()
+        col_v = identificar_coluna(t_fra.columns, ['vendedor', 'operador'])
+        col_n = identificar_coluna(t_fra.columns, ['nota', 'pedido', 'documento'])
+        col_val = identificar_coluna(t_fra.columns, ['valor_total', 'valor', 'total'])
+        if col_v and col_val:
+            t_fra_c = pd.DataFrame()
+            t_fra_c['Vendedor'] = t_fra[col_v].astype(str).str.strip().str.upper()
+            t_fra_c['Nota'] = t_fra[col_n] if col_n else '-'
+            t_fra_c['Valor_Total'] = t_fra[col_val].apply(limpar_valor)
+            t_fra_c['Origem'] = 'FRANCINE'
+            list_top.append(t_fra_c)
+
+    if df_top_fil is not None and not df_top_fil.empty:
+        t_fil = df_top_fil.copy()
+        col_v = identificar_coluna(t_fil.columns, ['vendedor', 'operador'])
+        col_n = identificar_coluna(t_fil.columns, ['nota', 'pedido', 'documento'])
+        col_val = identificar_coluna(t_fil.columns, ['valor_total', 'valor', 'total'])
+        if col_v and col_val:
+            t_fil_c = pd.DataFrame()
+            t_fil_c['Vendedor'] = t_fil[col_v].astype(str).str.strip().str.upper()
+            t_fil_c['Nota'] = t_fil[col_n] if col_n else '-'
+            t_fil_c['Valor_Total'] = t_fil[col_val].apply(limpar_valor)
+            t_fil_c['Origem'] = 'FILIPE'
+            list_top.append(t_fil_c)
+
     rank3 = pd.DataFrame()
-    if not df_notas_comb.empty and 'Valor_Total' in df_notas_comb.columns:
+    if list_top:
+        df_notas_comb = pd.concat(list_top, ignore_index=True)
+        df_notas_comb = df_notas_comb[df_notas_comb['Valor_Total'] > 0]
         rank3 = (
             df_notas_comb.sort_values(by='Valor_Total', ascending=False)
-            .drop_duplicates(subset=['Nota', 'Vendedor'] if 'Nota' in df_notas_comb.columns and 'Vendedor' in df_notas_comb.columns else None)
+            .drop_duplicates(subset=['Nota', 'Vendedor'] if 'Nota' in df_notas_comb.columns else ['Vendedor'])
             .reset_index(drop=True)
         )
     elif not df1_comb.empty and 'VALOR_NUM' in df1_comb.columns:
@@ -1011,35 +1204,98 @@ def modal_resultados_finais():
             key="modal_sel_cat_final"
         )
 
+    cat_escolhida_norm = normalizar_texto(cat_escolhida).replace("'", "").replace(" ", "")
+
     partes_cat = []
+
+    # Processa Francine para a categoria escolhida
+    df_r_fra = pd.DataFrame()
     if df_cat_fra is not None and not df_cat_fra.empty:
         df_r_fra, _, _ = extrair_ranking_categoria(df_cat_fra, cat_escolhida, disco_fra.get('df_fortpel'), disco_fra.get('df_adm_raw'))
-        if not df_r_fra.empty:
-            partes_cat.append(df_r_fra)
-    elif not df_rank_cat_fra.empty and disco_fra.get('categoria_solicitada') == cat_escolhida:
-        partes_cat.append(df_rank_cat_fra)
 
+    if df_r_fra is not None and not df_r_fra.empty:
+        col_v = identificar_coluna(df_r_fra.columns, ['vendedor', 'operador'])
+        col_val = identificar_coluna(df_r_fra.columns, ['total_vendido', 'valor_total', 'valor'])
+        if col_v and col_val:
+            df_r_fra_c = pd.DataFrame()
+            df_r_fra_c['Vendedor'] = df_r_fra[col_v].astype(str).str.strip().str.upper()
+            df_r_fra_c['Total_Vendido'] = df_r_fra[col_val].apply(limpar_valor)
+            df_r_fra_c['Origem'] = 'FRANCINE'
+            partes_cat.append(df_r_fra_c)
+    elif df_cats_fra is not None and not df_cats_fra.empty:
+        col_cat = identificar_coluna(df_cats_fra.columns, ['categoria', 'cat'])
+        col_v = identificar_coluna(df_cats_fra.columns, ['vendedor', 'operador'])
+        col_val = identificar_coluna(df_cats_fra.columns, ['total_vendido', 'valor_total', 'valor', 'total'])
+        if col_cat and col_v and col_val:
+            m = df_cats_fra[col_cat].apply(lambda x: cat_escolhida_norm in normalizar_texto(x).replace("'", "").replace(" ", "") or normalizar_texto(x).replace("'", "").replace(" ", "") in cat_escolhida_norm)
+            sub_c = df_cats_fra[m].copy()
+            if not sub_c.empty:
+                df_sub_c = pd.DataFrame()
+                df_sub_c['Vendedor'] = sub_c[col_v].astype(str).str.strip().str.upper()
+                df_sub_c['Total_Vendido'] = sub_c[col_val].apply(limpar_valor)
+                df_sub_c['Origem'] = 'FRANCINE'
+                partes_cat.append(df_sub_c)
+    elif not df_rank_cat_fra.empty:
+        cat_salva_fra = normalizar_texto(disco_fra.get('categoria_solicitada', '')).replace("'", "").replace(" ", "")
+        if cat_salva_fra == cat_escolhida_norm:
+            col_v = identificar_coluna(df_rank_cat_fra.columns, ['vendedor', 'operador'])
+            col_val = identificar_coluna(df_rank_cat_fra.columns, ['total_vendido', 'valor_total', 'valor'])
+            if col_v and col_val:
+                df_rf_c = pd.DataFrame()
+                df_rf_c['Vendedor'] = df_rank_cat_fra[col_v].astype(str).str.strip().str.upper()
+                df_rf_c['Total_Vendido'] = df_rank_cat_fra[col_val].apply(limpar_valor)
+                df_rf_c['Origem'] = 'FRANCINE'
+                partes_cat.append(df_rf_c)
+
+    # Processa Filipe para a categoria escolhida
+    df_r_fil = pd.DataFrame()
     if df_cat_fil is not None and not df_cat_fil.empty:
         df_r_fil, _, _ = extrair_ranking_categoria(df_cat_fil, cat_escolhida, disco_fil.get('df_fortpel'), disco_fil.get('df_adm_raw'))
-        if not df_r_fil.empty:
-            partes_cat.append(df_r_fil)
-    elif not df_rank_cat_fil.empty and disco_fil.get('categoria_solicitada') == cat_escolhida:
-        partes_cat.append(df_rank_cat_fil)
+
+    if df_r_fil is not None and not df_r_fil.empty:
+        col_v = identificar_coluna(df_r_fil.columns, ['vendedor', 'operador'])
+        col_val = identificar_coluna(df_r_fil.columns, ['total_vendido', 'valor_total', 'valor'])
+        if col_v and col_val:
+            df_r_fil_c = pd.DataFrame()
+            df_r_fil_c['Vendedor'] = df_r_fil[col_v].astype(str).str.strip().str.upper()
+            df_r_fil_c['Total_Vendido'] = df_r_fil[col_val].apply(limpar_valor)
+            df_r_fil_c['Origem'] = 'FILIPE'
+            partes_cat.append(df_r_fil_c)
+    elif df_cats_fil is not None and not df_cats_fil.empty:
+        col_cat = identificar_coluna(df_cats_fil.columns, ['categoria', 'cat'])
+        col_v = identificar_coluna(df_cats_fil.columns, ['vendedor', 'operador'])
+        col_val = identificar_coluna(df_cats_fil.columns, ['total_vendido', 'valor_total', 'valor', 'total'])
+        if col_cat and col_v and col_val:
+            m = df_cats_fil[col_cat].apply(lambda x: cat_escolhida_norm in normalizar_texto(x).replace("'", "").replace(" ", "") or normalizar_texto(x).replace("'", "").replace(" ", "") in cat_escolhida_norm)
+            sub_c = df_cats_fil[m].copy()
+            if not sub_c.empty:
+                df_sub_c = pd.DataFrame()
+                df_sub_c['Vendedor'] = sub_c[col_v].astype(str).str.strip().str.upper()
+                df_sub_c['Total_Vendido'] = sub_c[col_val].apply(limpar_valor)
+                df_sub_c['Origem'] = 'FILIPE'
+                partes_cat.append(df_sub_c)
+    elif not df_rank_cat_fil.empty:
+        cat_salva_fil = normalizar_texto(disco_fil.get('categoria_solicitada', '')).replace("'", "").replace(" ", "")
+        if cat_salva_fil == cat_escolhida_norm:
+            col_v = identificar_coluna(df_rank_cat_fil.columns, ['vendedor', 'operador'])
+            col_val = identificar_coluna(df_rank_cat_fil.columns, ['total_vendido', 'valor_total', 'valor'])
+            if col_v and col_val:
+                df_rfl_c = pd.DataFrame()
+                df_rfl_c['Vendedor'] = df_rank_cat_fil[col_v].astype(str).str.strip().str.upper()
+                df_rfl_c['Total_Vendido'] = df_rank_cat_fil[col_val].apply(limpar_valor)
+                df_rfl_c['Origem'] = 'FILIPE'
+                partes_cat.append(df_rfl_c)
 
     rank4 = pd.DataFrame()
     if partes_cat:
         df_cat_comb = pd.concat(partes_cat, ignore_index=True)
-        col_v_cat = identificar_coluna(df_cat_comb.columns, ["vendedor"])
-        col_val_cat = identificar_coluna(df_cat_comb.columns, ["total_vendido", "valor_total", "valor"])
-        if col_v_cat and col_val_cat:
-            df_cat_comb['Vendedor'] = df_cat_comb[col_v_cat].astype(str).str.strip().str.upper()
-            df_cat_comb['Total_Vendido'] = df_cat_comb[col_val_cat].apply(limpar_valor)
-            rank4 = (
-                df_cat_comb.groupby('Vendedor', as_index=False)['Total_Vendido']
-                .sum()
-                .sort_values(by='Total_Vendido', ascending=False)
-                .reset_index(drop=True)
-            )
+        df_cat_comb = df_cat_comb[df_cat_comb['Total_Vendido'] > 0]
+        rank4 = (
+            df_cat_comb.groupby('Vendedor', as_index=False)['Total_Vendido']
+            .sum()
+            .sort_values(by='Total_Vendido', ascending=False)
+            .reset_index(drop=True)
+        )
 
     # PAINEL COM OS 4 CAMPEÕES EM DESTAQUE (CARDS NO TOPO)
     st.markdown("### 🥇 Vendedores Campeões da Roleta")
@@ -1075,10 +1331,11 @@ def modal_resultados_finais():
             top3 = rank3.iloc[0]
             nota_val = int(top3['Nota']) if isinstance(top3['Nota'], (int, float)) and top3['Nota'] == int(top3['Nota']) else str(top3['Nota'])
             val_fmt = f"R$ {top3['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+            origem_top3 = f" ({top3['Origem']})" if 'Origem' in top3 and pd.notna(top3['Origem']) else ""
             st.metric(
                 label=f"🥇 {top3['Vendedor']}",
                 value=val_fmt,
-                delta=f"Nota/Pedido: {nota_val}"
+                delta=f"Nota/Pedido: {nota_val}{origem_top3}"
             )
         else:
             st.info("Sem dados de notas/pedidos faturados.")
