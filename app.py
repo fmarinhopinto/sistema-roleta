@@ -2,6 +2,7 @@ import io
 import os
 import re
 import unicodedata
+import datetime
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -255,28 +256,32 @@ def estilizar_aba_produtos(ws, df_top_notas, df_lideres_cat):
         c.alignment = Alignment(horizontal="center", vertical="center")
 
     linha_atual = 3
-    for pos, r in enumerate(df_top_notas.head(10).itertuples(), start=1):
-        c_pos = ws.cell(row=linha_atual, column=1, value=f"{pos}º")
-        c_pos.alignment = Alignment(horizontal="center")
-        c_pos.font = fonte_destaque if pos == 1 else fonte_dados
-        c_pos.border = borda_fina
+    if df_top_notas is not None and not df_top_notas.empty:
+        for pos, r in enumerate(df_top_notas.head(10).itertuples(), start=1):
+            c_pos = ws.cell(row=linha_atual, column=1, value=f"{pos}º")
+            c_pos.alignment = Alignment(horizontal="center")
+            c_pos.font = fonte_destaque if pos == 1 else fonte_dados
+            c_pos.border = borda_fina
 
-        c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
-        c_vend.font = fonte_destaque if pos == 1 else fonte_dados
-        c_vend.border = borda_fina
+            c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
+            c_vend.font = fonte_destaque if pos == 1 else fonte_dados
+            c_vend.border = borda_fina
 
-        nota_val = int(r.Nota) if pd.notna(r.Nota) and isinstance(r.Nota, (int, float)) and r.Nota == int(r.Nota) else str(r.Nota)
-        c_nota = ws.cell(row=linha_atual, column=3, value=nota_val)
-        c_nota.alignment = Alignment(horizontal="center")
-        c_nota.font = fonte_dados
-        c_nota.border = borda_fina
+            nota_val = int(r.Nota) if pd.notna(r.Nota) and isinstance(r.Nota, (int, float)) and r.Nota == int(r.Nota) else str(r.Nota)
+            c_nota = ws.cell(row=linha_atual, column=3, value=nota_val)
+            c_nota.alignment = Alignment(horizontal="center")
+            c_nota.font = fonte_dados
+            c_nota.border = borda_fina
 
-        c_val = ws.cell(row=linha_atual, column=4, value=float(r.Valor_Total))
-        c_val.number_format = 'R$ #,##0.00'
-        c_val.font = fonte_destaque if pos == 1 else fonte_dados
-        c_val.border = borda_fina
+            c_val = ws.cell(row=linha_atual, column=4, value=float(r.Valor_Total))
+            c_val.number_format = 'R$ #,##0.00'
+            c_val.font = fonte_destaque if pos == 1 else fonte_dados
+            c_val.border = borda_fina
 
-        linha_atual += 1
+            linha_atual += 1
+    else:
+        ws.cell(row=3, column=1, value="Sem dados de nota fiscal disponíveis.")
+        linha_atual = 4
 
     # Espaço entre blocos
     linha_atual += 2
@@ -294,21 +299,24 @@ def estilizar_aba_produtos(ws, df_top_notas, df_lideres_cat):
         c.alignment = Alignment(horizontal="center", vertical="center")
 
     linha_atual += 1
-    for r in df_lideres_cat.itertuples():
-        c_cat = ws.cell(row=linha_atual, column=1, value=str(r.Categoria))
-        c_cat.font = fonte_dados
-        c_cat.border = borda_fina
+    if df_lideres_cat is not None and not df_lideres_cat.empty:
+        for r in df_lideres_cat.itertuples():
+            c_cat = ws.cell(row=linha_atual, column=1, value=str(r.Categoria))
+            c_cat.font = fonte_dados
+            c_cat.border = borda_fina
 
-        c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
-        c_vend.font = fonte_destaque
-        c_vend.border = borda_fina
+            c_vend = ws.cell(row=linha_atual, column=2, value=str(r.Vendedor))
+            c_vend.font = fonte_destaque
+            c_vend.border = borda_fina
 
-        c_val = ws.cell(row=linha_atual, column=3, value=float(r.Valor_Total))
-        c_val.number_format = 'R$ #,##0.00'
-        c_val.font = fonte_dados
-        c_val.border = borda_fina
+            c_val = ws.cell(row=linha_atual, column=3, value=float(r.Valor_Total))
+            c_val.number_format = 'R$ #,##0.00'
+            c_val.font = fonte_dados
+            c_val.border = borda_fina
 
-        linha_atual += 1
+            linha_atual += 1
+    else:
+        ws.cell(row=linha_atual, column=1, value="Sem dados de categoria disponíveis.")
 
     # Auto-ajuste de largura de colunas
     for col in ws.columns:
@@ -502,60 +510,86 @@ def extrair_ranking_categoria(df_cat_raw, categoria_alvo, df_fortpel=None, df_ad
 
     return pd.DataFrame(), 0.0, pd.DataFrame(lideres_todas)
 
-def extrair_maior_venda_nota(df_fortpel, col_nota, col_vend, col_val, dt_inicio=None, dt_fim=None, df_cat_raw=None):
+def extrair_maior_venda_nf_faturada(df_nf_raw, dt_inicio=None, dt_fim=None):
     """
-    Calcula as maiores vendas em nota única.
-    Extrai primariamente a partir da base de pedidos do Fortpel.
-    Se df_cat_raw contiver itens detalhados por nota (ex: produtos.xlsx com n_nota_obs), complementa/reforça.
+    Processa a planilha do 6º campo de upload (NFs Faturadas no período):
+    - Identifica colunas de Nota, Vendedor, Valor e Data.
+    - Filtra pelo período selecionado (se houver coluna de data e intervalo).
+    - Agrupa por Nota e Vendedor, soma os valores e classifica do maior para o menor.
     """
-    df_top_notas = pd.DataFrame()
+    if df_nf_raw is None or df_nf_raw.empty:
+        return pd.DataFrame()
 
-    # 1. Tenta extrair de df_fortpel
-    if df_fortpel is not None and not df_fortpel.empty and col_nota and col_vend and col_val:
-        df_f = df_fortpel.copy()
-        df_f['__VALOR_NUM'] = df_f[col_val].apply(limpar_valor)
-        df_f['__VEND_LIMPO'] = df_f[col_vend].astype(str).str.strip().str.upper()
+    col_n = identificar_coluna(df_nf_raw.columns, ["n_nota_obs", "nota fiscal", "nota", "nf", "numero da nota", "nr nota", "num_nota", "documento", "pedido"])
+    col_v = identificar_coluna(df_nf_raw.columns, ["vendedor", "operador", "gestor", "carteira", "representante", "usuario"])
+    col_val = identificar_coluna(df_nf_raw.columns, ["vendas total", "venda total", "venda", "valor total", "valor", "total", "vl_total", "faturado", "preco venda"])
+    col_dt = identificar_coluna(df_nf_raw.columns, ["dt_nota_hist", "dt_emissao", "data emissao", "data faturamento", "dt_saida", "data", "dt", "emissao"])
 
-        if '__DATA_DT' in df_f.columns and pd.notna(dt_inicio) and pd.notna(dt_fim):
-            mask_dt = (df_f['__DATA_DT'].dt.date >= dt_inicio) & (df_f['__DATA_DT'].dt.date <= dt_fim)
-            df_sub = df_f[mask_dt].copy()
-            if df_sub.empty:
-                df_sub = df_f.copy()
-        else:
+    if not col_n or not col_v or not col_val:
+        return pd.DataFrame()
+
+    df_work = df_nf_raw.dropna(subset=[col_n, col_v]).copy()
+    df_work['__VAL'] = df_work[col_val].apply(limpar_valor)
+    df_work['__VEND'] = df_work[col_v].astype(str).str.strip().str.upper()
+
+    if col_dt and col_dt in df_work.columns and dt_inicio and dt_fim:
+        df_work['__DT'] = pd.to_datetime(df_work[col_dt], errors='coerce')
+        mask_dt = (df_work['__DT'].dt.date >= dt_inicio) & (df_work['__DT'].dt.date <= dt_fim)
+        if mask_dt.sum() > 0:
+            df_work = df_work[mask_dt].copy()
+
+    df_work['__NUM_NOTA'] = pd.to_numeric(df_work[col_n], errors='coerce')
+    df_valid = df_work[(df_work['__NUM_NOTA'].notna()) & (df_work['__NUM_NOTA'] > 0)].copy()
+    if df_valid.empty:
+        df_valid = df_work.copy()
+
+    df_grp = (
+        df_valid.groupby([col_n, '__VEND'], as_index=False)['__VAL']
+        .sum()
+        .rename(columns={col_n: 'Nota', '__VEND': 'Vendedor', '__VAL': 'Valor_Total'})
+        .sort_values(by='Valor_Total', ascending=False)
+    )
+    df_grp = df_grp[df_grp['Valor_Total'] > 0]
+    return df_grp
+
+def extrair_maior_venda_nota(df_fortpel, col_nota, col_vend, col_val, dt_inicio=None, dt_fim=None):
+    """
+    Calcula as maiores vendas em nota única a partir do Acompanhamento Fortpel (fallback caso o 6º campo não seja enviado).
+    """
+    if df_fortpel is None or df_fortpel.empty or not col_nota or not col_vend or not col_val:
+        return pd.DataFrame()
+
+    df_f = df_fortpel.copy()
+    df_f['__VALOR_NUM'] = df_f[col_val].apply(limpar_valor)
+    df_f['__VEND_LIMPO'] = df_f[col_vend].astype(str).str.strip().str.upper()
+
+    if '__DATA_DT' in df_f.columns and pd.notna(dt_inicio) and pd.notna(dt_fim):
+        mask_dt = (df_f['__DATA_DT'].dt.date >= dt_inicio) & (df_f['__DATA_DT'].dt.date <= dt_fim)
+        df_sub = df_f[mask_dt].copy()
+        if df_sub.empty:
             df_sub = df_f.copy()
+    else:
+        df_sub = df_f.copy()
 
-        # Group by nota e vendedor
-        df_grp = (
-            df_sub.groupby([col_nota, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
-            .sum()
-            .rename(columns={col_nota: 'Nota', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
-            .sort_values(by='Valor_Total', ascending=False)
-        )
-        df_grp = df_grp[df_grp['Valor_Total'] > 0]
-        if df_grp['Valor_Total'].nunique() > 1:
-            df_top_notas = df_grp
+    df_f_num = pd.to_numeric(df_sub[col_nota], errors='coerce')
+    df_sub_valid = df_sub[(df_f_num.notna()) & (df_f_num > 0)].copy()
+    if df_sub_valid.empty:
+        df_sub_valid = df_sub.copy()
 
-    # 2. Se df_fortpel tiver valores constantes ou vazios, verifica se df_cat_raw tem itens por nota (como produtos.xlsx)
-    if df_top_notas.empty and df_cat_raw is not None and not df_cat_raw.empty:
-        col_n = identificar_coluna(df_cat_raw.columns, ["n_nota_obs", "nota", "nf", "pedido"])
-        col_v = identificar_coluna(df_cat_raw.columns, ["vendedor", "operador", "gestor", "carteira"])
-        col_vl = identificar_coluna(df_cat_raw.columns, ["vendas total", "venda total", "venda", "valor total", "valor"])
-        if col_n and col_v and col_vl and col_n in df_cat_raw.columns and col_v in df_cat_raw.columns and col_vl in df_cat_raw.columns:
-            df_c_clean = df_cat_raw.dropna(subset=[col_n, col_v, col_vl]).copy()
-            df_c_clean['__VAL_N'] = df_c_clean[col_vl].apply(limpar_valor)
-            df_c_clean['__VEND_N'] = df_c_clean[col_v].astype(str).str.strip().str.upper()
-            df_top_notas = (
-                df_c_clean.groupby([col_n, '__VEND_N'], as_index=False)['__VAL_N']
-                .sum()
-                .rename(columns={col_n: 'Nota', '__VEND_N': 'Vendedor', '__VAL_N': 'Valor_Total'})
-                .sort_values(by='Valor_Total', ascending=False)
-            )
-
-    return df_top_notas
+    df_grp = (
+        df_sub_valid.groupby([col_nota, '__VEND_LIMPO'], as_index=False)['__VALOR_NUM']
+        .sum()
+        .rename(columns={col_nota: 'Nota', '__VEND_LIMPO': 'Vendedor', '__VALOR_NUM': 'Valor_Total'})
+        .sort_values(by='Valor_Total', ascending=False)
+    )
+    df_grp = df_grp[df_grp['Valor_Total'] > 0]
+    return df_grp
 
 
-# --- SELEÇÃO / UPLOAD DOS ARQUIVOS ---
-st.subheader("1. Arquivos de Entrada (Bases BI, Fortpel, ADM e Categorias)")
+# ========================================================
+# 1. SELEÇÃO / UPLOAD DOS ARQUIVOS (6 CAMPOS)
+# ========================================================
+st.subheader("1. Arquivos de Entrada (Bases BI, Fortpel, ADM, Categorias e NFs)")
 
 modo_leitura = st.radio(
     "Como deseja carregar os arquivos?",
@@ -568,34 +602,37 @@ file_reativados = None
 file_fortpel = None
 file_adm = None
 file_categorias = None
+file_nf = None
 categoria_solicitada = "HIGIENE E LIMPEZA"
 
 if modo_leitura == "Fazer Upload pelo Navegador":
     c1, c2 = st.columns(2)
-    c3, c4 = st.columns(2)
     with c1:
         file_novos = st.file_uploader("📥 1. BI Clientes Novos", type=["xlsx", "xls", "csv"], key="up_novos")
     with c2:
         file_reativados = st.file_uploader("📥 2. BI Clientes Reativados", type=["xlsx", "xls", "csv"], key="up_reat")
+
+    c3, c4 = st.columns(2)
     with c3:
         file_fortpel = st.file_uploader("📥 3. Acompanhamento Fortpel (Pedidos)", type=["xlsx", "xls", "csv"], key="up_fort")
     with c4:
         file_adm = st.file_uploader("📥 4. Planilha ADM (Orçamentos Efetivados)", type=["xlsx", "xls", "csv"], key="up_adm")
 
-    c5, c6 = st.columns([2, 1])
+    c5, c6 = st.columns(2)
     with c5:
         file_categorias = st.file_uploader("📥 5. Planilha de Categorias do BI", type=["xlsx", "xls", "csv"], key="up_cat")
-    with c6:
         categoria_solicitada = st.selectbox(
-            "🏷️ Categoria Solicitada:",
+            "🏷️ Categoria Solicitada (para o Campo 5):",
             CATEGORIAS_ROLETA,
             index=3,
             help="Selecione a categoria para identificar o vendedor com a maior venda.",
             key="sel_cat_req"
         )
+    with c6:
+        file_nf = st.file_uploader("📥 6. Planilha de NFs Faturadas do BI (Maior Nota do Período)", type=["xlsx", "xls", "csv"], key="up_nf")
 
 else:
-    # Busca tanto na pasta 'arquivos_entrada' quanto na pasta raiz do sistema
+    # Busca na pasta 'arquivos_entrada' e na pasta raiz do sistema
     arquivos_locais = sorted(list(set(
         [f.name for f in PASTA_ENTRADA.iterdir() if f.is_file() and not f.name.startswith('~$') and f.suffix.lower() in ['.xlsx', '.xls', '.csv']] +
         [f.name for f in BASE_DIR.iterdir() if f.is_file() and not f.name.startswith('~$') and f.suffix.lower() in ['.xlsx', '.xls', '.csv']]
@@ -613,12 +650,12 @@ else:
         padrao_reat = buscar_arquivo_padrao(arquivos_locais, ["reativ"])
         padrao_fort = buscar_arquivo_padrao(arquivos_locais, ["acomp", "fortpel"])
         padrao_adm = buscar_arquivo_padrao(arquivos_locais, ["adm", "orcamento", "proposta"])
-        padrao_cat = buscar_arquivo_padrao(arquivos_locais, ["categoria", "cat", "prod", "data (7", "data (8"])
+        padrao_cat = buscar_arquivo_padrao(arquivos_locais, ["categoria", "cat", "data (7", "data (8"])
+        padrao_nf = buscar_arquivo_padrao(arquivos_locais, ["prod", "nota", "fatur", "nf"])
 
-        c1, c2 = st.columns(2)
-        c3, c4 = st.columns(2)
         opcoes = ["Selecione..."] + arquivos_locais
 
+        c1, c2 = st.columns(2)
         with c1:
             idx_n = opcoes.index(padrao_novos) if padrao_novos in opcoes else 0
             nome_n = st.selectbox("1. BI Clientes Novos:", opcoes, index=idx_n, key="loc_novos")
@@ -631,6 +668,7 @@ else:
             if nome_r != "Selecione...":
                 file_reativados = resolver_caminho(nome_r)
 
+        c3, c4 = st.columns(2)
         with c3:
             idx_f = opcoes.index(padrao_fort) if padrao_fort in opcoes else 0
             nome_f = st.selectbox("3. Acompanhamento Fortpel:", opcoes, index=idx_f, key="loc_fort")
@@ -643,167 +681,150 @@ else:
             if nome_a != "Selecione...":
                 file_adm = resolver_caminho(nome_a)
 
-        c5, c6 = st.columns([2, 1])
+        c5, c6 = st.columns(2)
         with c5:
             idx_p = opcoes.index(padrao_cat) if padrao_cat in opcoes else 0
-            nome_p = st.selectbox("5. Planilha de Categorias do BI (Opcional):", opcoes, index=idx_p, key="loc_cat")
+            nome_p = st.selectbox("5. Planilha de Categorias do BI:", opcoes, index=idx_p, key="loc_cat")
             if nome_p != "Selecione...":
                 file_categorias = resolver_caminho(nome_p)
-        with c6:
             categoria_solicitada = st.selectbox(
-                "🏷️ Categoria Solicitada:",
+                "🏷️ Categoria Solicitada (para o Campo 5):",
                 CATEGORIAS_ROLETA,
                 index=3,
                 help="Selecione a categoria para identificar o vendedor com a maior venda.",
                 key="sel_cat_req_loc"
             )
 
+        with c6:
+            idx_nf = opcoes.index(padrao_nf) if padrao_nf in opcoes else 0
+            nome_nf = st.selectbox("6. Planilha de NFs Faturadas do BI (Maior Nota):", opcoes, index=idx_nf, key="loc_nf")
+            if nome_nf != "Selecione...":
+                file_nf = resolver_caminho(nome_nf)
 
-# --- MAPEAMENTO E PROCESSAMENTO ---
-if file_novos and file_reativados and file_fortpel and file_adm:
-    try:
-        with st.spinner("Lendo arquivos Excel/CSV..."):
-            df_novos_raw = carregar_dados(file_novos)
-            df_reativados_raw = carregar_dados(file_reativados)
-            df_fortpel_raw = carregar_dados(file_fortpel)
-            df_adm_raw = carregar_dados(file_adm)
-            df_categorias_raw = carregar_dados(file_categorias) if file_categorias else None
-    except Exception as e:
-        st.error(f"Erro ao ler arquivos: {e}")
-        st.stop()
 
-    qtd_bases = 5 if df_categorias_raw is not None else 4
-    st.success(f"As {qtd_bases} bases foram carregadas com sucesso!")
+# ========================================================
+# 2. CONFIGURAÇÕES DE PERÍODO E PARÂMETROS
+# ========================================================
+st.subheader("2. Configuração de Período e Parâmetros")
 
-    st.subheader("2. Mapeamento das Colunas Chave")
-    titulos_abas_map = ["Bases do BI", "Acompanhamento Fortpel", "Planilha ADM (Orçamentos)"]
-    if df_categorias_raw is not None:
-        titulos_abas_map.append("Planilha de Categorias (BI)")
+hoje = datetime.date.today()
+inicio_padrao = hoje.replace(day=1)
+fim_padrao = hoje
 
-    abas_mapeamento = st.tabs(titulos_abas_map)
-    tab_bi = abas_mapeamento[0]
-    tab_fortpel = abas_mapeamento[1]
-    tab_adm = abas_mapeamento[2]
-    tab_cat = abas_mapeamento[3] if df_categorias_raw is not None else None
+c_p1, c_p2 = st.columns(2)
+with c_p1:
+    data_sel = st.date_input(
+        "📅 Intervalo de Datas do Período Comercial:",
+        value=(inicio_padrao, fim_padrao),
+        format="DD/MM/YYYY"
+    )
 
-    with tab_bi:
-        c_b1, c_b2 = st.columns(2)
-        with c_b1:
-            col_novos_cli = st.selectbox(
-                "Coluna Cliente (BI Novos)",
-                df_novos_raw.columns,
-                index=df_novos_raw.columns.get_loc(identificar_coluna(df_novos_raw.columns, ["cliente", "razao", "nome"]))
-            )
-            col_novos_val = identificar_coluna(df_novos_raw.columns, ["venda", "valor", "total", "faturado"])
-        with c_b2:
-            col_reat_cli = st.selectbox(
-                "Coluna Cliente (BI Reativados)",
-                df_reativados_raw.columns,
-                index=df_reativados_raw.columns.get_loc(identificar_coluna(df_reativados_raw.columns, ["cliente", "razao", "nome"]))
-            )
-            col_reat_val = identificar_coluna(df_reativados_raw.columns, ["venda", "valor", "total", "faturado"])
+    modo_filtro_roleta = st.radio(
+        "Filtro de Data para a Roleta (Aba 1 - Novos e Reativados):",
+        [
+            "Opção B: Filtrar pelo intervalo de datas selecionado (Inclusivo, recomendado)",
+            "Opção A: Considerar tudo que vier no BI (Sem restrição de data na Roleta)"
+        ],
+        index=0,
+        help="A Opção B restringe os pedidos rigorosamente entre as datas selecionadas."
+    )
 
-    with tab_fortpel:
-        c_f1, c_f2, c_f3 = st.columns(3)
-        c_f4, c_f5, c_f6 = st.columns(3)
-        with c_f1:
-            col_f_cli = st.selectbox("Cliente", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["cliente", "razao", "nome"])))
-        with c_f2:
-            col_f_ped = st.selectbox("Pedido", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["pedido", "numero", "ordem"])))
-        with c_f3:
-            idx_not = df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["nota", "nf", "n_nota", "n_nota_obs", "pedido"]))
-            col_f_nota = st.selectbox("Nota Fiscal (para Maior Venda em Nota Única):", df_fortpel_raw.columns, index=idx_not)
-        with c_f4:
-            col_f_vend = st.selectbox("Vendedor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["carteira", "operador", "vendedor", "representante", "gestor"])))
-        with c_f5:
-            col_f_val = st.selectbox("Valor", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["valor", "total", "faturado", "preco", "somadevl"])))
-        with c_f6:
-            col_f_data = st.selectbox("Data", df_fortpel_raw.columns, index=df_fortpel_raw.columns.get_loc(identificar_coluna(df_fortpel_raw.columns, ["dt_inser", "dt inser", "data inser", "dt_saida", "data", "emissao", "faturamento", "dt"])))
+with c_p2:
+    criterio_roleta = st.radio(
+        "Critério de Contagem da Roleta (Aba 1):",
+        [
+            "1 Registro por Cliente Único (Padrão BI - 1 linha por cliente, soma exata)",
+            "Todos os Pedidos Individuais (Pode gerar múltiplas linhas se o cliente fez mais de um pedido)"
+        ],
+        index=0,
+        help="No relatório do BI, cada cliente conta como 1 registro. Marque '1 Registro por Cliente Único' para bater 100% com o BI."
+    )
 
-        # Opção inteligente para valor da Aba 1 (caso Fortpel tenha apenas soma total)
-        tem_valor_bi = (col_novos_val is not None) and (col_reat_val is not None)
-        origem_valor_aba1 = st.radio(
-            "Origem do Valor da Aba 1 (Novos/Reativados):",
-            [
-                "Usar coluna 'Venda' do BI (Novos e Reativados) [Recomendado se o Acompanhamento tiver total geral]",
-                "Usar coluna selecionada do Acompanhamento Fortpel"
-            ] if tem_valor_bi else ["Usar coluna selecionada do Acompanhamento Fortpel"],
-            index=0 if tem_valor_bi else 0
-        )
+    origem_valor_aba1 = st.radio(
+        "Origem do Valor da Aba 1 (Novos/Reativados):",
+        [
+            "Usar coluna 'Venda' do BI (Novos e Reativados) [Recomendado se o Acompanhamento tiver total geral]",
+            "Usar coluna de Valor do Acompanhamento Fortpel"
+        ],
+        index=0
+    )
 
-    with tab_adm:
-        st.markdown("📊 **Tabela Dinâmica ADM (Aba 2: Propostas Enviadas)**")
-        st.caption("A aba de propostas é gerada pela contagem de registros do campo Status por Vendedor.")
-        c_a1, c_a2 = st.columns(2)
-        with c_a1:
-            idx_v = df_adm_raw.columns.get_loc(identificar_coluna(df_adm_raw.columns, ["vendedor", "operador", "usuario", "representante"]))
-            col_a_vend = st.selectbox("Coluna Vendedor (ADM):", df_adm_raw.columns, index=idx_v)
-        with c_a2:
-            idx_s = df_adm_raw.columns.get_loc(identificar_coluna(df_adm_raw.columns, ["status", "situacao", "fase"]))
-            col_a_status = st.selectbox("Coluna Status / Contagem (ADM):", df_adm_raw.columns, index=idx_s)
 
-        todos_status_adm = sorted([str(s) for s in df_adm_raw[col_a_status].dropna().unique()])
-        status_adm_selecionados = st.multiselect(
-            "Filtrar por Status específicos (opcional - por padrão conta todos):",
-            options=todos_status_adm,
-            default=todos_status_adm,
-            help="Selecione quais status entram na contagem. Por padrão, todos os status presentes na planilha são contabilizados."
-        )
+# ========================================================
+# 3. CONTROLE DE EXECUÇÃO: BOTÃO GERAR TABELA
+# ========================================================
+st.markdown("---")
+btn_col1, btn_col2, btn_col3 = st.columns([1, 2, 1])
+with btn_col2:
+    botao_gerar = st.button("🚀 Gerar Tabela / Processar Dados", type="primary", use_container_width=True)
 
-    if tab_cat is not None:
-        with tab_cat:
-            st.markdown("📦 **Planilha de Categorias do BI**")
-            st.caption("Verificação automática das categorias oficiais na planilha carregada.")
-            encontradas = [cat for cat in CATEGORIAS_ROLETA if any(normalizar_texto(cat).replace("'", "").replace(" ", "") in normalizar_texto(str(col)).replace("'", "").replace(" ", "") for col in df_categorias_raw.columns)]
-            if encontradas:
-                st.success(f"✅ {len(encontradas)} das 7 categorias oficiais identificadas nas colunas: {', '.join(encontradas)}")
-            else:
-                st.info("Formato detalhado por produto/linha detectado. O sistema cruzará os dados automaticamente.")
+def obter_id_arquivo(f):
+    if f is None:
+        return "None"
+    if hasattr(f, 'name') and hasattr(f, 'size'):
+        return f"{f.name}_{f.size}"
+    return str(f)
 
-    # Conversão de Datas (Apenas Fortpel requer data)
-    df_fortpel = df_fortpel_raw.copy()
-    df_fortpel['__DATA_DT'] = pd.to_datetime(df_fortpel[col_f_data], dayfirst=True, errors='coerce')
+fingerprint_atual = (
+    obter_id_arquivo(file_novos),
+    obter_id_arquivo(file_reativados),
+    obter_id_arquivo(file_fortpel),
+    obter_id_arquivo(file_adm),
+    obter_id_arquivo(file_categorias),
+    obter_id_arquivo(file_nf),
+    str(data_sel),
+    modo_filtro_roleta,
+    criterio_roleta,
+    origem_valor_aba1
+)
 
-    datas_validas = df_fortpel['__DATA_DT'].dropna()
-    min_date = datas_validas.min() if not datas_validas.empty else pd.Timestamp.now()
-    max_date = datas_validas.max() if not datas_validas.empty else pd.Timestamp.now()
+# Se as entradas mudaram, invalida o processamento anterior para garantir que nada seja exibido desatualizado
+if st.session_state.get('fingerprint_salvo') != fingerprint_atual:
+    st.session_state['processado'] = False
 
-    # --- FILTRO POR PERÍODO ---
-    st.subheader("3. Período e Filtro de Datas")
 
-    c_filt1, c_filt2 = st.columns([1, 1])
-    with c_filt1:
-        modo_filtro_roleta = st.radio(
-            "Filtro de Data para a Roleta (Aba 1 - Novos e Reativados):",
-            [
-                "Opção B: Filtrar pelo intervalo de datas selecionado (Inclusivo, recomendado)",
-                "Opção A: Considerar tudo que vier no BI (Sem restrição de data na Roleta)"
-            ],
-            index=0,
-            help="A Opção B restringe os pedidos rigorosamente entre as datas selecionadas, evitando trazer pedidos inseridos após a data limite ou pedidos antigos."
-        )
-
-        criterio_roleta = st.radio(
-            "Critério de Contagem da Roleta (Aba 1):",
-            [
-                "1 Registro por Cliente Único (Padrão BI - 1 linha por cliente, soma exata)",
-                "Todos os Pedidos Individuais (Pode gerar múltiplas linhas se o cliente fez mais de um pedido)"
-            ],
-            index=0,
-            help="No relatório do BI, cada cliente conta como 1 registro. Marque '1 Registro por Cliente Único' para bater 100% com o relatório do BI."
-        )
-
-    with c_filt2:
-        data_sel = st.date_input(
-            "Selecione o intervalo de datas (para Aba 2 e filtro da Roleta):",
-            value=(min_date.date(), max_date.date())
-        )
-
-    if isinstance(data_sel, tuple) and len(data_sel) == 2:
+# ========================================================
+# 4. PROCESSAMENTO (DISPARADO EXCLUSIVAMENTE PELO BOTÃO)
+# ========================================================
+if botao_gerar:
+    # Valida presença das 4 bases obrigatórias
+    if not (file_novos and file_reativados and file_fortpel and file_adm):
+        st.error("⚠️ Atenção: Por favor, selecione ao menos as 4 bases principais (1. Novos, 2. Reativados, 3. Fortpel e 4. ADM) antes de gerar a tabela.")
+    elif not (isinstance(data_sel, tuple) and len(data_sel) == 2):
+        st.warning("⚠️ Atenção: Por favor, selecione a data de início e a data de fim no calendário do período.")
+    else:
         dt_inicio, dt_fim = data_sel
+        with st.spinner("⏳ Carregando arquivos e processando dados da Roleta..."):
+            try:
+                # Leitura sob demanda (nada é carregado antes de clicar no botão)
+                df_novos_raw = carregar_dados(file_novos)
+                df_reativados_raw = carregar_dados(file_reativados)
+                df_fortpel_raw = carregar_dados(file_fortpel)
+                df_adm_raw = carregar_dados(file_adm)
+                df_categorias_raw = carregar_dados(file_categorias) if file_categorias else None
+                df_nf_raw = carregar_dados(file_nf) if file_nf else None
 
-        if st.button("🚀 Processar e Gerar Planilha Completa", type="primary"):
-            with st.spinner("Processando cruzamentos das bases..."):
+                # Mapeamento automático inteligente de colunas
+                col_novos_cli = identificar_coluna(df_novos_raw.columns, ["cliente", "razao", "nome"])
+                col_novos_val = identificar_coluna(df_novos_raw.columns, ["venda", "valor", "total", "faturado"])
+
+                col_reat_cli = identificar_coluna(df_reativados_raw.columns, ["cliente", "razao", "nome"])
+                col_reat_val = identificar_coluna(df_reativados_raw.columns, ["venda", "valor", "total", "faturado"])
+
+                col_f_cli = identificar_coluna(df_fortpel_raw.columns, ["cliente", "razao", "nome"])
+                col_f_ped = identificar_coluna(df_fortpel_raw.columns, ["pedido", "numero", "ordem"])
+                col_f_nota = identificar_coluna(df_fortpel_raw.columns, ["nota", "nf", "n_nota", "n_nota_obs", "pedido"])
+                col_f_vend = identificar_coluna(df_fortpel_raw.columns, ["carteira", "operador", "vendedor", "representante", "gestor"])
+                col_f_val = identificar_coluna(df_fortpel_raw.columns, ["valor", "total", "faturado", "preco", "somadevl"])
+                col_f_data = identificar_coluna(df_fortpel_raw.columns, ["dt_inser", "dt inser", "data inser", "dt_saida", "data", "emissao", "faturamento", "dt"])
+
+                col_a_vend = identificar_coluna(df_adm_raw.columns, ["vendedor", "operador", "usuario", "representante"])
+                col_a_status = identificar_coluna(df_adm_raw.columns, ["status", "situacao", "fase"])
+
+                # Tratamento de datas no Fortpel
+                df_fortpel = df_fortpel_raw.copy()
+                df_fortpel['__DATA_DT'] = pd.to_datetime(df_fortpel[col_f_data], dayfirst=True, errors='coerce')
+
                 # ==========================================
                 # ABA 1: REATIVADOS - NOVOS
                 # ==========================================
@@ -839,26 +860,22 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                     if df_aba1.empty and mask_status.sum() > 0:
                         mask_data_f_flex = (df_fortpel['__DATA_DT'].dt.date <= dt_fim) if pd.notna(dt_fim) else True
                         df_aba1 = df_fortpel[mask_data_f_flex & mask_status].copy()
-                        if not df_aba1.empty:
-                            st.warning(f"⚠️ Atenção: Não foram encontrados pedidos exatamente no intervalo selecionado ({dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}), mas os clientes foram localizados na base. Os pedidos foram recuperados considerando os registros até a data limite!")
 
                 if "Cliente Único" in criterio_roleta:
                     df_aba1 = df_aba1.sort_values(by=['__DATA_DT', col_f_ped], ascending=[True, True])
                     df_aba1 = df_aba1.drop_duplicates(subset=['__CLI_NORM'], keep='first')
 
-                if "BI" in origem_valor_aba1:
+                if "BI" in origem_valor_aba1 and col_novos_val and col_reat_val:
                     mapa_valores_bi = {}
-                    if col_novos_val:
-                        for _, row in df_novos_clean.iterrows():
-                            mapa_valores_bi[row['__CLI_NORM']] = limpar_valor(row[col_novos_val])
-                    if col_reat_val:
-                        for _, row in df_reat_clean.iterrows():
-                            mapa_valores_bi[row['__CLI_NORM']] = limpar_valor(row[col_reat_val])
+                    for _, row in df_novos_clean.iterrows():
+                        mapa_valores_bi[row['__CLI_NORM']] = limpar_valor(row[col_novos_val])
+                    for _, row in df_reat_clean.iterrows():
+                        mapa_valores_bi[row['__CLI_NORM']] = limpar_valor(row[col_reat_val])
                     df_aba1['VALOR_NUM'] = df_aba1['__CLI_NORM'].map(mapa_valores_bi).fillna(0.0)
                 else:
                     df_aba1['VALOR_NUM'] = df_aba1[col_f_val].apply(limpar_valor)
 
-                # Regra Duas Compras
+                # Regra Duas Compras no Mesmo Mês
                 meses_periodo = set(pd.date_range(dt_inicio, dt_fim).to_period('M'))
                 mask_meses_f = df_fortpel['__DATA_DT'].dt.to_period('M').isin(meses_periodo)
                 pedidos_no_mes = df_fortpel[mask_meses_f].groupby('__CLI_NORM')[col_f_ped].nunique().to_dict()
@@ -882,9 +899,6 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 # ABA 2: PROPOSTAS ENVIADAS (TABELA DINÂMICA ADM)
                 # ==========================================
                 df_adm_filtrado = df_adm_raw.dropna(subset=[col_a_vend]).copy()
-                if status_adm_selecionados:
-                    df_adm_filtrado = df_adm_filtrado[df_adm_filtrado[col_a_status].astype(str).isin(status_adm_selecionados)]
-
                 df_aba2 = (
                     df_adm_filtrado.groupby(col_a_vend)[col_a_status]
                     .count()
@@ -894,20 +908,22 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 df_aba2 = df_aba2.sort_values(by=['Qtd', 'Vendedor'], ascending=[False, True])
 
                 # ========================================================
-                # 🏆 MAIOR VENDA EM NOTA ÚNICA (EXTRAÍDA DAS OUTRAS BASES)
+                # 🏆 MAIOR VENDA EM NOTA ÚNICA (CAMPO 6 OU FALLBACK FORTPEL)
                 # ========================================================
-                df_top_notas = extrair_maior_venda_nota(
-                    df_fortpel=df_fortpel,
-                    col_nota=col_f_nota,
-                    col_vend=col_f_vend,
-                    col_val=col_f_val,
-                    dt_inicio=dt_inicio,
-                    dt_fim=dt_fim,
-                    df_cat_raw=df_categorias_raw
-                )
+                if df_nf_raw is not None and not df_nf_raw.empty:
+                    df_top_notas = extrair_maior_venda_nf_faturada(df_nf_raw, dt_inicio=dt_inicio, dt_fim=dt_fim)
+                else:
+                    df_top_notas = extrair_maior_venda_nota(
+                        df_fortpel=df_fortpel,
+                        col_nota=col_f_nota,
+                        col_vend=col_f_vend,
+                        col_val=col_f_val,
+                        dt_inicio=dt_inicio,
+                        dt_fim=dt_fim
+                    )
 
                 # ========================================================
-                # 🏷️ CATEGORIAS DO BI (SE PLANILHA 5 FOI CARREGADA)
+                # 🏷️ CATEGORIAS DO BI (SE CAMPO 5 CARREGADO)
                 # ========================================================
                 df_rank_cat = pd.DataFrame()
                 total_geral_cat = 0.0
@@ -960,8 +976,9 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 wb.save(buffer_download)
                 buffer_download.seek(0)
 
-                # Salva no Session State para manter persistente entre seleções
+                # Salva os resultados no Session State
                 st.session_state['processado'] = True
+                st.session_state['fingerprint_salvo'] = fingerprint_atual
                 st.session_state['df_aba1'] = df_aba1
                 st.session_state['df_aba2'] = df_aba2
                 st.session_state['df_top_notas'] = df_top_notas
@@ -974,133 +991,155 @@ if file_novos and file_reativados and file_fortpel and file_adm:
                 st.session_state['categoria_solicitada'] = categoria_solicitada
                 st.session_state['col_f_ped'] = col_f_ped
                 st.session_state['col_f_cli'] = col_f_cli
+                st.session_state['col_f_vend'] = col_f_vend
                 st.session_state['nome_aba1'] = nome_aba1
                 st.session_state['nome_aba2'] = nome_aba2
                 st.session_state['caminho_salvar_local'] = caminho_salvar_local
                 st.session_state['buffer_bytes'] = buffer_download.getvalue()
                 st.session_state['nome_arquivo_saida'] = nome_arquivo_saida
-                st.session_state['tem_categorias'] = (df_categorias_raw is not None)
+                st.session_state['mapeamento_colunas'] = {
+                    "BI Novos": f"Cliente: `{col_novos_cli}` | Valor: `{col_novos_val}`",
+                    "BI Reativados": f"Cliente: `{col_reat_cli}` | Valor: `{col_reat_val}`",
+                    "Acompanhamento Fortpel": f"Cliente: `{col_f_cli}` | Pedido: `{col_f_ped}` | Vendedor: `{col_f_vend}` | Valor: `{col_f_val}` | Data: `{col_f_data}`",
+                    "Planilha ADM": f"Vendedor: `{col_a_vend}` | Status: `{col_a_status}`",
+                    "NFs Faturadas (Campo 6)": "Ativo" if df_nf_raw is not None else "Não enviado (usando Fortpel)",
+                    "Categorias (Campo 5)": "Ativo" if df_categorias_raw is not None else "Não enviado"
+                }
 
-        # Exibição dos Resultados (Persistente no Session State)
-        if st.session_state.get('processado', False):
-            df_aba1_s = st.session_state['df_aba1']
-            df_aba2_s = st.session_state['df_aba2']
-            nome_aba1_s = st.session_state['nome_aba1']
-            nome_aba2_s = st.session_state['nome_aba2']
-            caminho_local_s = st.session_state['caminho_salvar_local']
-            buffer_bytes_s = st.session_state['buffer_bytes']
-            nome_saida_s = st.session_state['nome_arquivo_saida']
+            except Exception as e:
+                st.error(f"❌ Ocorreu um erro ao processar as planilhas: {e}")
+                st.session_state['processado'] = False
 
-            st.success("✅ Planilha gerada com 3 abas consolidadas com sucesso!")
-            st.info(f"📁 Arquivo salvo em: `{caminho_local_s}`")
 
-            abas_titulos = [f"Aba 1: {nome_aba1_s}", f"Aba 2: {nome_aba2_s}", "Aba 3: 🏆 Destaques Comerciais (Roleta)"]
-            abas_res = st.tabs(abas_titulos)
+# ========================================================
+# 5. EXIBIÇÃO DOS RESULTADOS (SOMENTE APÓS PROCESSAMENTO)
+# ========================================================
+if st.session_state.get('processado', False):
+    df_aba1_s = st.session_state['df_aba1']
+    df_aba2_s = st.session_state['df_aba2']
+    nome_aba1_s = st.session_state['nome_aba1']
+    nome_aba2_s = st.session_state['nome_aba2']
+    caminho_local_s = st.session_state['caminho_salvar_local']
+    buffer_bytes_s = st.session_state['buffer_bytes']
+    nome_saida_s = st.session_state['nome_arquivo_saida']
 
-            with abas_res[0]:
-                if not df_aba1_s.empty:
-                    qtd_duas_compras = int(df_aba1_s['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1_s else 0
-                    if qtd_duas_compras > 0:
-                        st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
-                    st.dataframe(df_aba1_s[['VENDEDOR_CLEAN', st.session_state['col_f_ped'], st.session_state['col_f_cli'], 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
-                else:
-                    st.write("Sem registros no período para a Aba 1.")
+    st.success("✅ Tabelas processadas e consolidadas com sucesso!")
+    st.info(f"📁 Arquivo Excel salvo em: `{caminho_local_s}`")
 
-            with abas_res[1]:
-                if not df_aba2_s.empty:
-                    st.dataframe(df_aba2_s, use_container_width=True)
-                    st.metric("Total de Propostas Efetivadas", int(df_aba2_s['Qtd'].sum()))
-                else:
-                    st.write("Sem registros na planilha ADM.")
+    abas_titulos = [f"Aba 1: {nome_aba1_s}", f"Aba 2: {nome_aba2_s}", "Aba 3: 🏆 Destaques Roleta (Nota Única & Categorias)"]
+    abas_res = st.tabs(abas_titulos)
 
-            with abas_res[2]:
-                df_top_notas_s = st.session_state.get('df_top_notas', pd.DataFrame())
-                df_cat_raw_s = st.session_state.get('df_categorias_raw')
-                df_fort_s = st.session_state.get('df_fortpel')
-                df_adm_s = st.session_state.get('df_adm_raw')
-                cat_padrao = st.session_state.get('categoria_solicitada', 'HIGIENE E LIMPEZA')
+    with abas_res[0]:
+        if not df_aba1_s.empty:
+            qtd_duas_compras = int(df_aba1_s['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1_s else 0
+            if qtd_duas_compras > 0:
+                st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
+            st.dataframe(df_aba1_s[['VENDEDOR_CLEAN', st.session_state['col_f_ped'], st.session_state['col_f_cli'], 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
+        else:
+            st.write("Sem registros no período para a Aba 1.")
 
-                # ========================================================
-                # 🏆 1. MAIOR VENDA EM NOTA ÚNICA (INFORMAÇÃO DA FOTO)
-                # ========================================================
-                st.markdown("### 🏆 Maior Venda em Nota Única")
-                st.caption("Extraído das bases de acompanhamento e pedidos carregadas.")
+    with abas_res[1]:
+        if not df_aba2_s.empty:
+            st.dataframe(df_aba2_s, use_container_width=True)
+            st.metric("Total de Propostas Efetivadas", int(df_aba2_s['Qtd'].sum()))
+        else:
+            st.write("Sem registros na planilha ADM.")
 
-                if not df_top_notas_s.empty:
-                    top1_nota = df_top_notas_s.iloc[0]
-                    nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
-                    val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    with abas_res[2]:
+        df_top_notas_s = st.session_state.get('df_top_notas', pd.DataFrame())
+        df_cat_raw_s = st.session_state.get('df_categorias_raw')
+        df_fort_s = st.session_state.get('df_fortpel')
+        df_adm_s = st.session_state.get('df_adm_raw')
+        cat_padrao = st.session_state.get('categoria_solicitada', 'HIGIENE E LIMPEZA')
 
-                    c_m1, c_m2, c_m3 = st.columns(3)
-                    with c_m1:
-                        st.metric("Vendedor Campeão (Nota Única)", str(top1_nota['Vendedor']))
-                    with c_m2:
-                        st.metric("Nota Fiscal", nota_formatada)
-                    with c_m3:
-                        st.metric("Valor Total da Nota", val_formatado)
+        # ========================================================
+        # 🏆 1. MAIOR VENDA EM NOTA ÚNICA (CAMPO 6 OU FORTPEL)
+        # ========================================================
+        st.markdown("### 🏆 Maior Venda em Nota Única")
+        st.caption("Calculado a partir da análise das NFs faturadas no período (Campo 6 ou base Fortpel).")
 
-                    with st.expander("📋 Ver Ranking das Maiores Vendas em Nota Única"):
-                        df_notas_disp = df_top_notas_s.copy()
-                        df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                        st.dataframe(df_notas_disp, use_container_width=True)
-                else:
-                    st.info("Informações de nota única disponíveis na base de Acompanhamento Fortpel.")
+        if not df_top_notas_s.empty:
+            top1_nota = df_top_notas_s.iloc[0]
+            nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
+            val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-                st.markdown("---")
+            c_m1, c_m2, c_m3 = st.columns(3)
+            with c_m1:
+                st.metric("Vendedor Campeão (Nota Única)", str(top1_nota['Vendedor']))
+            with c_m2:
+                st.metric("Nota Fiscal", nota_formatada)
+            with c_m3:
+                st.metric("Valor Total da Nota", val_formatado)
 
-                # ========================================================
-                # 🏷️ 2. MAIOR VENDA POR CATEGORIA SOLICITADA
-                # ========================================================
-                st.markdown("### 🏷️ Consulta de Maior Venda por Categoria Solicitada")
-                st.caption("Selecione a categoria desejada para visualizar o vendedor que fez a maior venda:")
+            with st.expander("📋 Ver Ranking Completo das Maiores Vendas em Nota Única"):
+                df_notas_disp = df_top_notas_s.copy()
+                df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                st.dataframe(df_notas_disp, use_container_width=True)
+        else:
+            st.info("Informações de notas fiscais faturadas não disponíveis para o período.")
 
-                idx_cat_sel = CATEGORIAS_ROLETA.index(cat_padrao) if cat_padrao in CATEGORIAS_ROLETA else 0
-                cat_escolhida = st.selectbox(
-                    "Selecione a Categoria:",
-                    CATEGORIAS_ROLETA,
-                    index=idx_cat_sel,
-                    key="sel_cat_destaque"
-                )
+        st.markdown("---")
 
-                if df_cat_raw_s is not None:
-                    # Calcula instantaneamente para a categoria escolhida no dropdown
-                    df_rank_escolhido, total_escolhido, df_lideres_todas = extrair_ranking_categoria(
-                        df_cat_raw=df_cat_raw_s,
-                        categoria_alvo=cat_escolhida,
-                        df_fortpel=df_fort_s,
-                        df_adm=df_adm_s
-                    )
+        # ========================================================
+        # 🏷️ 2. MAIOR VENDA POR CATEGORIA SOLICITADA
+        # ========================================================
+        st.markdown("### 🏷️ Consulta de Maior Venda por Categoria Solicitada")
+        st.caption("Selecione a categoria desejada para visualizar o vendedor que fez a maior venda:")
 
-                    if not df_rank_escolhido.empty:
-                        lider_cat = df_rank_escolhido.iloc[0]
-                        val_lider_fmt = f"R$ {lider_cat['Total_Vendido']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-                        total_geral_fmt = f"R$ {total_escolhido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        idx_cat_sel = CATEGORIAS_ROLETA.index(cat_padrao) if cat_padrao in CATEGORIAS_ROLETA else 0
+        cat_escolhida = st.selectbox(
+            "Selecione a Categoria:",
+            CATEGORIAS_ROLETA,
+            index=idx_cat_sel,
+            key="sel_cat_destaque"
+        )
 
-                        col_c1, col_c2, col_c3 = st.columns(3)
-                        with col_c1:
-                            st.metric("Vendedor Líder da Categoria", str(lider_cat['Vendedor']))
-                        with col_c2:
-                            st.metric(f"Vendido por {lider_cat['Vendedor']}", val_lider_fmt)
-                        with col_c3:
-                            st.metric(f"Total Geral ({cat_escolhida})", total_geral_fmt)
-
-                        st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
-                        df_cat_disp = df_rank_escolhido.copy()
-                        df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                        st.dataframe(df_cat_disp, use_container_width=True)
-
-                    if not df_lideres_todas.empty:
-                        with st.expander("📊 Ver Tabela Geral de Líderes das 7 Categorias"):
-                            df_lid_disp = df_lideres_todas.copy()
-                            df_lid_disp['Valor_Total'] = df_lid_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            df_lid_disp['Total_Categoria'] = df_lid_disp['Total_Categoria'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            st.dataframe(df_lid_disp, use_container_width=True)
-                else:
-                    st.info("ℹ️ Para consultar os vendedores líderes por categoria, faça o upload da Planilha de Categorias do BI no Campo 5.")
-
-            st.download_button(
-                label="📥 Baixar Planilha Consolidada (3 Abas) (.xlsx)",
-                data=buffer_bytes_s,
-                file_name=nome_saida_s,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if df_cat_raw_s is not None:
+            df_rank_escolhido, total_escolhido, df_lideres_todas = extrair_ranking_categoria(
+                df_cat_raw=df_cat_raw_s,
+                categoria_alvo=cat_escolhida,
+                df_fortpel=df_fort_s,
+                df_adm=df_adm_s
             )
+
+            if not df_rank_escolhido.empty:
+                lider_cat = df_rank_escolhido.iloc[0]
+                val_lider_fmt = f"R$ {lider_cat['Total_Vendido']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                total_geral_fmt = f"R$ {total_escolhido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+                col_c1, col_c2, col_c3 = st.columns(3)
+                with col_c1:
+                    st.metric("Vendedor Líder da Categoria", str(lider_cat['Vendedor']))
+                with col_c2:
+                    st.metric(f"Vendido por {lider_cat['Vendedor']}", val_lider_fmt)
+                with col_c3:
+                    st.metric(f"Total Geral ({cat_escolhida})", total_geral_fmt)
+
+                st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
+                df_cat_disp = df_rank_escolhido.copy()
+                df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                st.dataframe(df_cat_disp, use_container_width=True)
+
+            if not df_lideres_todas.empty:
+                with st.expander("📊 Ver Tabela Geral de Líderes das 7 Categorias"):
+                    df_lid_disp = df_lideres_todas.copy()
+                    df_lid_disp['Valor_Total'] = df_lid_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    df_lid_disp['Total_Categoria'] = df_lid_disp['Total_Categoria'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    st.dataframe(df_lid_disp, use_container_width=True)
+        else:
+            st.info("ℹ️ Para consultar os vendedores líderes por categoria, faça o upload da Planilha de Categorias do BI no Campo 5.")
+
+    with st.expander("🔍 Mapeamento das Colunas Identificadas nas Planilhas"):
+        for base, det in st.session_state.get('mapeamento_colunas', {}).items():
+            st.markdown(f"- **{base}**: {det}")
+
+    st.download_button(
+        label="📥 Baixar Planilha Consolidada (3 Abas) (.xlsx)",
+        data=buffer_bytes_s,
+        file_name=nome_saida_s,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+else:
+    # Quando o botão ainda não foi clicado: nada é carregado ou gerado
+    st.info("👆 Selecione ou envie as planilhas nos campos acima, configure o período comercial e clique no botão **'🚀 Gerar Tabela / Processar Dados'** para iniciar o processamento.")
