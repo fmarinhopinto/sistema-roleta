@@ -3,6 +3,7 @@ import os
 import re
 import unicodedata
 import datetime
+import pickle
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -17,13 +18,55 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- DIRETÓRIOS LOCAIS ---
+# --- DIRETÓRIOS LOCAIS E COMPARTILHADOS ---
 BASE_DIR = Path(__file__).resolve().parent
 PASTA_ENTRADA = BASE_DIR / "arquivos_entrada"
 PASTA_SAIDA = BASE_DIR / "planilhas_geradas"
+PASTA_STORAGE = BASE_DIR / "dados_compartilhados"
 
 PASTA_ENTRADA.mkdir(parents=True, exist_ok=True)
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
+PASTA_STORAGE.mkdir(parents=True, exist_ok=True)
+
+# --- FUNÇÕES DE PERSISTÊNCIA COMPARTILHADA (DISCO DO SERVIDOR) ---
+def salvar_dados_operador(nome_op, dados_dict):
+    """
+    Persiste os dados de um operador em disco para sincronização
+    entre navegadores e computadores diferentes (Filipe <-> Francine).
+    """
+    prefixo = nome_op.lower()
+    arquivo_pkl = PASTA_STORAGE / f"{prefixo}_dados.pkl"
+    try:
+        with open(arquivo_pkl, "wb") as f:
+            pickle.dump(dados_dict, f)
+    except Exception as e:
+        st.error(f"Erro ao sincronizar dados de {nome_op}: {e}")
+
+def carregar_dados_operador(nome_op):
+    """
+    Carrega os dados persistidos de um operador diretamente do disco do servidor.
+    """
+    prefixo = nome_op.lower()
+    arquivo_pkl = PASTA_STORAGE / f"{prefixo}_dados.pkl"
+    if arquivo_pkl.exists():
+        try:
+            with open(arquivo_pkl, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Erro ao ler dados de {nome_op}: {e}")
+    return None
+
+def limpar_dados_operador(nome_op):
+    """
+    Remove os dados persistidos de um operador para iniciar uma nova rodada limpa.
+    """
+    prefixo = nome_op.lower()
+    arquivo_pkl = PASTA_STORAGE / f"{prefixo}_dados.pkl"
+    if arquivo_pkl.exists():
+        try:
+            arquivo_pkl.unlink()
+        except Exception:
+            pass
 
 # --- FUNÇÕES DE SUPORTE ---
 def normalizar_texto(texto):
@@ -79,11 +122,6 @@ def limpar_valor(val):
     return pd.to_numeric(s, errors='coerce') or 0.0
 
 def estilizar_aba(ws, df_dados, col_id_nome, col_id_val, col_cli_nome, col_data_dt, titulo_col_id="PEDIDO", titulo_status=None):
-    """
-    Formata e preenche uma aba no padrão exato da Roleta:
-    - Colunas A-G: Analítico
-    - Colunas I-K: Resumo por Vendedor com fórmulas =SUM()
-    """
     fonte_cabecalho = Font(name="Calibri", size=11, bold=True, color="000000")
     fill_cabecalho = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     borda_fina = Border(
@@ -540,18 +578,7 @@ def extrair_maior_venda_nota(df_fortpel, col_nota, col_vend, col_val, dt_inicio=
     df_grp = df_grp[df_grp['Valor_Total'] > 0]
     return df_grp
 
-def obter_id_arquivo(f):
-    if f is None:
-        return "None"
-    if hasattr(f, 'name') and hasattr(f, 'size'):
-        return f"{f.name}_{f.size}"
-    return str(f)
-
 def carregar_planilha_ajustada(arquivo):
-    """
-    Lê uma planilha Excel previamente gerada e ajustada manualmente pelo usuário.
-    Retorna dicionário contendo df_aba1 (Novos/Reativados) e df_aba2 (Propostas).
-    """
     xl = pd.ExcelFile(arquivo)
     res = {}
 
@@ -647,7 +674,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
     fonte_dados = Font(name="Calibri", size=11, bold=False, color="000000")
     fonte_destaque = Font(name="Calibri", size=11, bold=True, color="000000")
 
-    # ABA 1: PÓDIO DOS CAMPEÕES
     ws0 = wb.active
     ws0.title = "🏆 Campeões Roleta"
     ws0.cell(row=1, column=1, value="🏆 RESULTADOS FINAIS DA ROLETA COMERCIAL").font = fonte_titulo
@@ -661,21 +687,18 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
         c.alignment = Alignment(horizontal="center", vertical="center")
 
     podio_rows = []
-    # 1. Novos/Reativados
     if rank1 is not None and not rank1.empty:
         top1 = rank1.iloc[0]
         podio_rows.append(("1º Ranking", "Maior Nº de Clientes Novos/Reativados", str(top1['Vendedor']), f"{int(top1['Qtd_Clientes'])} clientes (R$ {top1['Valor_Total']:,.2f})"))
     else:
         podio_rows.append(("1º Ranking", "Maior Nº de Clientes Novos/Reativados", "-", "Sem dados"))
 
-    # 2. Propostas Enviadas
     if rank2 is not None and not rank2.empty:
         top2 = rank2.iloc[0]
         podio_rows.append(("2º Ranking", "Maior Nº de Propostas Enviadas", str(top2['Vendedor']), f"{int(top2['Total_Propostas'])} propostas"))
     else:
         podio_rows.append(("2º Ranking", "Maior Nº de Propostas Enviadas", "-", "Sem dados"))
 
-    # 3. Maior Pedido Faturado
     if rank3 is not None and not rank3.empty:
         top3 = rank3.iloc[0]
         nota_val = int(top3['Nota']) if isinstance(top3['Nota'], (int, float)) and top3['Nota'] == int(top3['Nota']) else str(top3['Nota'])
@@ -683,7 +706,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
     else:
         podio_rows.append(("3º Ranking", "Maior Pedido Faturado (Nota Única)", "-", "Sem dados"))
 
-    # 4. Maior Venda Categoria
     if rank4 is not None and not rank4.empty:
         top4 = rank4.iloc[0]
         podio_rows.append(("4º Ranking", f"Maior Venda Categoria: {cat_nome}", str(top4['Vendedor']), f"R$ {top4['Total_Vendido']:,.2f}"))
@@ -704,7 +726,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
         letra = get_column_letter(col[0].column)
         ws0.column_dimensions[letra].width = max(max(len(str(c.value or '')) for c in col) + 4, 18)
 
-    # ABA 2: RANKING 1 (NOVOS E REATIVADOS)
     ws1 = wb.create_sheet("1. Novos e Reativados")
     ws1.append(["POSIÇÃO", "VENDEDOR", "QTD CLIENTES", "VALOR TOTAL PEDIDOS (DESEMPATE)"])
     for c in ws1[1]:
@@ -728,7 +749,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
         letra = get_column_letter(col[0].column)
         ws1.column_dimensions[letra].width = max(max(len(str(c.value or '')) for c in col) + 4, 16)
 
-    # ABA 3: RANKING 2 (PROPOSTAS)
     ws2 = wb.create_sheet("2. Propostas Enviadas")
     ws2.append(["POSIÇÃO", "VENDEDOR", "TOTAL PROPOSTAS ENVIADAS"])
     for c in ws2[1]:
@@ -750,7 +770,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
         letra = get_column_letter(col[0].column)
         ws2.column_dimensions[letra].width = max(max(len(str(c.value or '')) for c in col) + 4, 16)
 
-    # ABA 4: RANKING 3 (MAIOR PEDIDO)
     ws3 = wb.create_sheet("3. Maior Pedido Faturado")
     ws3.append(["POSIÇÃO", "VENDEDOR", "NOTA / PEDIDO", "VALOR TOTAL FATURADO"])
     for c in ws3[1]:
@@ -775,7 +794,6 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
         letra = get_column_letter(col[0].column)
         ws3.column_dimensions[letra].width = max(max(len(str(c.value or '')) for c in col) + 4, 16)
 
-    # ABA 5: RANKING 4 (CATEGORIA)
     ws4 = wb.create_sheet("4. Vendas por Categoria")
     ws4.append(["POSIÇÃO", "VENDEDOR", f"TOTAL VENDIDO ({cat_nome})"])
     for c in ws4[1]:
@@ -809,7 +827,7 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
 @st.dialog("📤 UPLOAD DE PLANILHA AJUSTADA", width="large")
 def modal_upload_ajustada():
     st.markdown("### 📤 Upload de Planilha Ajustada (Pós-Edição Manual)")
-    st.caption("Utilize este campo quando tiver realizado ajustes no Excel baixado (ex: caso um cliente tenha mais de 1 pedido ou ajustes de brindes). As planilhas ajustadas substituirão as bases brutas na apuração dos **Resultados Finais**.")
+    st.caption("Utilize este campo quando tiver realizado ajustes manuais no Excel (ex: caso um cliente tenha mais de 1 pedido ou ajustes de brindes). As planilhas ajustadas são salvas no servidor e sincronizadas para ambos os operadores.")
 
     col_u1, col_u2 = st.columns(2)
     with col_u1:
@@ -818,17 +836,33 @@ def modal_upload_ajustada():
         if file_fra is not None:
             dados_fra = carregar_planilha_ajustada(file_fra)
             if 'df_aba1' in dados_fra:
+                # Salva o arquivo em disco
+                caminho_fra_disk = PASTA_STORAGE / "francine_ajustada.xlsx"
+                with open(caminho_fra_disk, "wb") as f_out:
+                    f_out.write(file_fra.getvalue())
+
+                # Atualiza objeto de persistência
+                existente_fra = carregar_dados_operador("FRANCINE") or {}
+                existente_fra.update({
+                    'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                    'processado': True,
+                    'usando_ajustada': True,
+                    'df_aba1': dados_fra['df_aba1'],
+                    'df_aba2': dados_fra.get('df_aba2', pd.DataFrame()),
+                    'nome_arquivo_ajustada': file_fra.name
+                })
+                salvar_dados_operador("FRANCINE", existente_fra)
                 st.session_state['df_aba1_francine_ajustada'] = dados_fra['df_aba1']
                 st.session_state['df_aba2_francine_ajustada'] = dados_fra.get('df_aba2', pd.DataFrame())
-                st.session_state['nome_arquivo_ajustada_fra'] = file_fra.name
-                st.success(f"✅ Francine: {len(dados_fra['df_aba1'])} clientes novos/reativados carregados!")
+                st.success(f"✅ Francine: {len(dados_fra['df_aba1'])} clientes carregados e sincronizados!")
 
-        if st.session_state.get('df_aba1_francine_ajustada') is not None:
-            st.info(f"Arquivo ativo: `{st.session_state.get('nome_arquivo_ajustada_fra', 'Ajustada')}`")
+        fra_disco = carregar_dados_operador("FRANCINE")
+        if fra_disco and fra_disco.get('usando_ajustada'):
+            st.info(f"Arquivo ativo: `{fra_disco.get('nome_arquivo_ajustada', 'Planilha Ajustada')}` ({fra_disco.get('timestamp')})")
             if st.button("🗑️ Remover Planilha Ajustada de Francine", key="del_aj_fra"):
+                limpar_dados_operador("FRANCINE")
                 st.session_state.pop('df_aba1_francine_ajustada', None)
                 st.session_state.pop('df_aba2_francine_ajustada', None)
-                st.session_state.pop('nome_arquivo_ajustada_fra', None)
                 st.rerun()
 
     with col_u2:
@@ -837,17 +871,31 @@ def modal_upload_ajustada():
         if file_fil is not None:
             dados_fil = carregar_planilha_ajustada(file_fil)
             if 'df_aba1' in dados_fil:
+                caminho_fil_disk = PASTA_STORAGE / "filipe_ajustada.xlsx"
+                with open(caminho_fil_disk, "wb") as f_out:
+                    f_out.write(file_fil.getvalue())
+
+                existente_fil = carregar_dados_operador("FILIPE") or {}
+                existente_fil.update({
+                    'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                    'processado': True,
+                    'usando_ajustada': True,
+                    'df_aba1': dados_fil['df_aba1'],
+                    'df_aba2': dados_fil.get('df_aba2', pd.DataFrame()),
+                    'nome_arquivo_ajustada': file_fil.name
+                })
+                salvar_dados_operador("FILIPE", existente_fil)
                 st.session_state['df_aba1_filipe_ajustada'] = dados_fil['df_aba1']
                 st.session_state['df_aba2_filipe_ajustada'] = dados_fil.get('df_aba2', pd.DataFrame())
-                st.session_state['nome_arquivo_ajustada_fil'] = file_fil.name
-                st.success(f"✅ Filipe: {len(dados_fil['df_aba1'])} clientes novos/reativados carregados!")
+                st.success(f"✅ Filipe: {len(dados_fil['df_aba1'])} clientes carregados e sincronizados!")
 
-        if st.session_state.get('df_aba1_filipe_ajustada') is not None:
-            st.info(f"Arquivo ativo: `{st.session_state.get('nome_arquivo_ajustada_fil', 'Ajustada')}`")
+        fil_disco = carregar_dados_operador("FILIPE")
+        if fil_disco and fil_disco.get('usando_ajustada'):
+            st.info(f"Arquivo ativo: `{fil_disco.get('nome_arquivo_ajustada', 'Planilha Ajustada')}` ({fil_disco.get('timestamp')})")
             if st.button("🗑️ Remover Planilha Ajustada de Filipe", key="del_aj_fil"):
+                limpar_dados_operador("FILIPE")
                 st.session_state.pop('df_aba1_filipe_ajustada', None)
                 st.session_state.pop('df_aba2_filipe_ajustada', None)
-                st.session_state.pop('nome_arquivo_ajustada_fil', None)
                 st.rerun()
 
     st.markdown("---")
@@ -858,54 +906,51 @@ def modal_upload_ajustada():
 @st.dialog("🏆 RESULTADOS FINAIS DA ROLETA COMERCIAL", width="large")
 def modal_resultados_finais():
     st.markdown("## 🏆 Resultados Finais Consolidados (Roleta Comercial)")
-    st.caption("Cruzamento e consolidação dos resultados de **FRANCINE** e **FILIPE** para eleição dos campeões.")
+    st.caption("Cruzamento e consolidação sincronizada das planilhas de **FRANCINE** e **FILIPE**.")
 
-    # 1. Recupera dados de FRANCINE (prioriza versão ajustada se enviada)
-    df1_fra = st.session_state.get('df_aba1_francine_ajustada')
-    fra_usando_ajustada = df1_fra is not None
+    # 1. Recupera dados de FRANCINE diretamente do disco sincronizado
+    disco_fra = carregar_dados_operador("FRANCINE") or {}
+    df1_fra = disco_fra.get('df_aba1')
+    df2_fra = disco_fra.get('df_aba2')
+    df_top_fra = disco_fra.get('df_top_notas', pd.DataFrame())
+    df_cat_fra = disco_fra.get('df_categorias_raw')
+    df_rank_cat_fra = disco_fra.get('df_rank_cat', pd.DataFrame())
+    fra_usando_ajustada = bool(disco_fra.get('usando_ajustada'))
+
+    # Fallback para session_state local se não estiver no disco
     if df1_fra is None:
-        df1_fra = st.session_state.get('df_aba1_francine')
-
-    df2_fra = st.session_state.get('df_aba2_francine_ajustada')
+        df1_fra = st.session_state.get('df_aba1_francine_ajustada') or st.session_state.get('df_aba1_francine')
     if df2_fra is None:
-        df2_fra = st.session_state.get('df_aba2_francine')
+        df2_fra = st.session_state.get('df_aba2_francine_ajustada') or st.session_state.get('df_aba2_francine')
 
-    df_top_fra = st.session_state.get('df_top_notas_francine', pd.DataFrame())
-    df_cat_fra = st.session_state.get('df_categorias_raw_francine')
-    df_rank_cat_fra = st.session_state.get('df_rank_cat_francine', pd.DataFrame())
+    # 2. Recupera dados de FILIPE diretamente do disco sincronizado
+    disco_fil = carregar_dados_operador("FILIPE") or {}
+    df1_fil = disco_fil.get('df_aba1')
+    df2_fil = disco_fil.get('df_aba2')
+    df_top_fil = disco_fil.get('df_top_notas', pd.DataFrame())
+    df_cat_fil = disco_fil.get('df_categorias_raw')
+    df_rank_cat_fil = disco_fil.get('df_rank_cat', pd.DataFrame())
+    fil_usando_ajustada = bool(disco_fil.get('usando_ajustada'))
 
-    # 2. Recupera dados de FILIPE (prioriza versão ajustada se enviada)
-    df1_fil = st.session_state.get('df_aba1_filipe_ajustada')
-    fil_usando_ajustada = df1_fil is not None
     if df1_fil is None:
-        df1_fil = st.session_state.get('df_aba1_filipe')
-
-    df2_fil = st.session_state.get('df_aba2_filipe_ajustada')
+        df1_fil = st.session_state.get('df_aba1_filipe_ajustada') or st.session_state.get('df_aba1_filipe')
     if df2_fil is None:
-        df2_fil = st.session_state.get('df_aba2_filipe')
-
-    df_top_fil = st.session_state.get('df_top_notas_filipe', pd.DataFrame())
-    df_cat_fil = st.session_state.get('df_categorias_raw_filipe')
-    df_rank_cat_fil = st.session_state.get('df_rank_cat_filipe', pd.DataFrame())
+        df2_fil = st.session_state.get('df_aba2_filipe_ajustada') or st.session_state.get('df_aba2_filipe')
 
     tem_dados_fra = (df1_fra is not None and not df1_fra.empty) or (df2_fra is not None and not df2_fra.empty)
     tem_dados_fil = (df1_fil is not None and not df1_fil.empty) or (df2_fil is not None and not df2_fil.empty)
 
     if not (tem_dados_fra or tem_dados_fil):
-        st.warning("⚠️ Atenção: Nenhuma planilha foi gerada ou enviada ainda. Por favor, processe as planilhas de Francine e/ou Filipe nos painéis abaixo, ou faça o upload das planilhas ajustadas no botão **'UPLOAD DE PLANILHA AJUSTADA'**.")
+        st.warning("⚠️ Atenção: Nenhuma planilha foi gerada ou enviada ainda. Por favor, processe as planilhas nos painéis abaixo ou faça o upload das planilhas ajustadas no botão **'UPLOAD DE PLANILHA AJUSTADA'**.")
         return
 
-    # Banner de fontes de dados utilizadas
-    info_fra = "📝 Ajustada" if fra_usando_ajustada else ("✅ Gerada" if tem_dados_fra else "⚪ Sem dados")
-    info_fil = "📝 Ajustada" if fil_usando_ajustada else ("✅ Gerada" if tem_dados_fil else "⚪ Sem dados")
-    st.info(f"📊 **Bases utilizadas para apuração:** Francine (**{info_fra}**) | Filipe (**{info_fil}**)")
+    ts_fra_txt = disco_fra.get('timestamp', '')
+    ts_fil_txt = disco_fil.get('timestamp', '')
+    info_fra = f"📝 Ajustada ({ts_fra_txt})" if fra_usando_ajustada else (f"✅ Gerada ({ts_fra_txt})" if tem_dados_fra else "⚪ Sem dados")
+    info_fil = f"📝 Ajustada ({ts_fil_txt})" if fil_usando_ajustada else (f"✅ Gerada ({ts_fil_txt})" if tem_dados_fil else "⚪ Sem dados")
+    st.info(f"📊 **Bases sincronizadas:** Francine (**{info_fra}**) | Filipe (**{info_fil}**)")
 
-    # ========================================================
-    # CÁLCULO DOS 4 RANKINGS OFICIAIS
-    # ========================================================
-
-    # --- 1. MAIOR NÚMERO DE CLIENTES NOVOS / REATIVADOS ---
-    # Critério: soma clientes por vendedor. Desempate: valor dos pedidos
+    # 1. MAIOR NÚMERO DE CLIENTES NOVOS / REATIVADOS
     p_df1_fra = padronizar_df_aba1(df1_fra)
     p_df1_fil = padronizar_df_aba1(df1_fil)
     df1_comb = pd.concat([p_df1_fra, p_df1_fil], ignore_index=True)
@@ -922,7 +967,7 @@ def modal_resultados_finais():
             .reset_index(drop=True)
         )
 
-    # --- 2. MAIOR NÚMERO DE PROPOSTAS ENVIADAS ---
+    # 2. MAIOR NÚMERO DE PROPOSTAS ENVIADAS
     p_df2_fra = padronizar_df_aba2(df2_fra)
     p_df2_fil = padronizar_df_aba2(df2_fil)
     df2_comb = pd.concat([p_df2_fra, p_df2_fil], ignore_index=True)
@@ -937,7 +982,7 @@ def modal_resultados_finais():
             .reset_index(drop=True)
         )
 
-    # --- 3. MAIOR PEDIDO FATURADO ---
+    # 3. MAIOR PEDIDO FATURADO
     df_notas_comb = pd.concat([df_top_fra, df_top_fil], ignore_index=True)
     rank3 = pd.DataFrame()
     if not df_notas_comb.empty and 'Valor_Total' in df_notas_comb.columns:
@@ -947,15 +992,14 @@ def modal_resultados_finais():
             .reset_index(drop=True)
         )
     elif not df1_comb.empty and 'VALOR_NUM' in df1_comb.columns:
-        # Fallback caso notas não tenham sido carregadas separadamente
         rank3 = (
             df1_comb.sort_values(by='VALOR_NUM', ascending=False)
             .rename(columns={'Pedido': 'Nota', 'VALOR_NUM': 'Valor_Total'})
             .reset_index(drop=True)
         )
 
-    # --- 4. MAIOR VENDA DA CATEGORIA DETERMINADA PREVIAMENTE ---
-    cat_sugerida = st.session_state.get('categoria_solicitada_francine') or st.session_state.get('categoria_solicitada_filipe') or "HIGIENE E LIMPEZA"
+    # 4. MAIOR VENDA DA CATEGORIA DETERMINADA PREVIAMENTE
+    cat_sugerida = disco_fra.get('categoria_solicitada') or disco_fil.get('categoria_solicitada') or st.session_state.get('categoria_solicitada_francine') or "HIGIENE E LIMPEZA"
     idx_cat_final = CATEGORIAS_ROLETA.index(cat_sugerida) if cat_sugerida in CATEGORIAS_ROLETA else 0
 
     col_sel_cat, _ = st.columns([1, 1])
@@ -967,20 +1011,19 @@ def modal_resultados_finais():
             key="modal_sel_cat_final"
         )
 
-    # Se tiver bases brutas de categorias, reextrai com precisão para a categoria selecionada
     partes_cat = []
     if df_cat_fra is not None and not df_cat_fra.empty:
-        df_r_fra, _, _ = extrair_ranking_categoria(df_cat_fra, cat_escolhida, st.session_state.get('df_fortpel_francine'), st.session_state.get('df_adm_raw_francine'))
+        df_r_fra, _, _ = extrair_ranking_categoria(df_cat_fra, cat_escolhida, disco_fra.get('df_fortpel'), disco_fra.get('df_adm_raw'))
         if not df_r_fra.empty:
             partes_cat.append(df_r_fra)
-    elif not df_rank_cat_fra.empty and st.session_state.get('categoria_solicitada_francine') == cat_escolhida:
+    elif not df_rank_cat_fra.empty and disco_fra.get('categoria_solicitada') == cat_escolhida:
         partes_cat.append(df_rank_cat_fra)
 
     if df_cat_fil is not None and not df_cat_fil.empty:
-        df_r_fil, _, _ = extrair_ranking_categoria(df_cat_fil, cat_escolhida, st.session_state.get('df_fortpel_filipe'), st.session_state.get('df_adm_raw_filipe'))
+        df_r_fil, _, _ = extrair_ranking_categoria(df_cat_fil, cat_escolhida, disco_fil.get('df_fortpel'), disco_fil.get('df_adm_raw'))
         if not df_r_fil.empty:
             partes_cat.append(df_r_fil)
-    elif not df_rank_cat_fil.empty and st.session_state.get('categoria_solicitada_filipe') == cat_escolhida:
+    elif not df_rank_cat_fil.empty and disco_fil.get('categoria_solicitada') == cat_escolhida:
         partes_cat.append(df_rank_cat_fil)
 
     rank4 = pd.DataFrame()
@@ -998,9 +1041,7 @@ def modal_resultados_finais():
                 .reset_index(drop=True)
             )
 
-    # ========================================================
     # PAINEL COM OS 4 CAMPEÕES EM DESTAQUE (CARDS NO TOPO)
-    # ========================================================
     st.markdown("### 🥇 Vendedores Campeões da Roleta")
     c_m1, c_m2 = st.columns(2)
     c_m3, c_m4 = st.columns(2)
@@ -1057,9 +1098,7 @@ def modal_resultados_finais():
 
     st.markdown("---")
 
-    # ========================================================
     # TABELAS DETALHADAS DE CADA RANKING
-    # ========================================================
     st.markdown("### 📋 Classificação Completa por Critério")
     tabs_finais = st.tabs([
         "👥 1. Novos / Reativados",
@@ -1110,9 +1149,6 @@ def modal_resultados_finais():
 
     st.markdown("---")
 
-    # ========================================================
-    # EXPORTAÇÃO COMPLETA DOS RESULTADOS EM EXCEL
-    # ========================================================
     bytes_excel_final = gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_escolhida)
     nome_arq_final = f"Resultados_Finais_Roleta_Consolidado_{datetime.date.today().strftime('%d%m%Y')}.xlsx"
 
@@ -1133,28 +1169,45 @@ def modal_resultados_finais():
 
 
 # ========================================================
-# CABEÇALHO E SELETOR DO OPERADOR (FRANCINE / FILIPE)
+# CABEÇALHO, SELETOR E SINCRONIZAÇÃO
 # ========================================================
 st.title("🎯 Sistema Roleta - Controle Comercial")
 
-status_fra_txt = "📝 Ajustada" if st.session_state.get('df_aba1_francine_ajustada') is not None else ("✅ Gerado" if st.session_state.get('processado_francine') else "⚪ Pendente")
-status_fil_txt = "📝 Ajustada" if st.session_state.get('df_aba1_filipe_ajustada') is not None else ("✅ Gerado" if st.session_state.get('processado_filipe') else "⚪ Pendente")
+# Obtém status lendo diretamente do disco do servidor (compartilhado entre máquinas)
+dados_fra_disk = carregar_dados_operador("FRANCINE")
+dados_fil_disk = carregar_dados_operador("FILIPE")
 
-col_top_sel, col_top_status = st.columns([2, 1])
+if dados_fra_disk:
+    ts_f = dados_fra_disk.get('timestamp', '')
+    status_fra_txt = f"📝 Ajustada ({ts_f})" if dados_fra_disk.get('usando_ajustada') else f"✅ Gerado ({ts_f})"
+else:
+    status_fra_txt = "⚪ Pendente"
+
+if dados_fil_disk:
+    ts_l = dados_fil_disk.get('timestamp', '')
+    status_fil_txt = f"📝 Ajustada ({ts_l})" if dados_fil_disk.get('usando_ajustada') else f"✅ Gerado ({ts_l})"
+else:
+    status_fil_txt = "⚪ Pendente"
+
+col_top_sel, col_top_status, col_top_sync = st.columns([2, 2, 1])
 with col_top_sel:
     operador_ativo = st.radio(
         "👤 Selecione o Operador / Perfil:",
         ["FRANCINE", "FILIPE"],
         horizontal=True,
         key="sel_operador_global",
-        help="Cada operador possui sua própria área de trabalho e gera sua planilha independente."
+        help="Cada operador possui sua própria área de trabalho e seus dados ficam salvos e sincronizados no servidor."
     )
 with col_top_status:
-    st.markdown("**Status dos Relatórios:**")
+    st.markdown("**Status dos Relatórios (Sincronizado):**")
     st.caption(f"FRANCINE: **{status_fra_txt}** | FILIPE: **{status_fil_txt}**")
+with col_top_sync:
+    st.write("")
+    if st.button("🔄 Sincronizar", help="Atualiza e sincroniza as planilhas salvas por ambos os computadores", use_container_width=True):
+        st.rerun()
 
 # ========================================================
-# BOTÕES DE AÇÕES GLOBAIS (PLANILHA AJUSTADA E RESULTADOS FINAIS)
+# BOTÕES DE AÇÕES GLOBAIS
 # ========================================================
 col_btn_acoes1, col_btn_acoes2 = st.columns(2)
 with col_btn_acoes1:
@@ -1165,26 +1218,34 @@ with col_btn_acoes2:
     if st.button("🏆 GERAR RESULTADOS FINAIS", type="primary", use_container_width=True, help="Cruza as planilhas de Francine e Filipe e abre a tela com os 4 rankings consolidados"):
         modal_resultados_finais()
 
-# Alerta caso alguma planilha ajustada esteja ativa
-tem_ajustada_fra = st.session_state.get('df_aba1_francine_ajustada') is not None
-tem_ajustada_fil = st.session_state.get('df_aba1_filipe_ajustada') is not None
+tem_ajustada_fra = dados_fra_disk and dados_fra_disk.get('usando_ajustada')
+tem_ajustada_fil = dados_fil_disk and dados_fil_disk.get('usando_ajustada')
 if tem_ajustada_fra or tem_ajustada_fil:
     nomes_aj = []
     if tem_ajustada_fra: nomes_aj.append("FRANCINE")
     if tem_ajustada_fil: nomes_aj.append("FILIPE")
-    st.success(f"📝 **Planilha Ajustada ativa para:** {', '.join(nomes_aj)}. O cálculo dos Resultados Finais priorizará os dados ajustados automaticamente!")
+    st.success(f"📝 **Planilha Ajustada sincronizada para:** {', '.join(nomes_aj)}. A apuração dos Resultados Finais utilizará os dados ajustados automaticamente!")
 
 st.markdown("---")
 
 
 # ========================================================
-# FUNÇÃO PARA RENDERIZAR O PAINEL DE UM OPERADOR ESPECÍFICO
+# PAINEL INDIVIDUAL DO OPERADOR (COM PERSISTÊNCIA COMPARTILHADA)
 # ========================================================
 def renderizar_painel_operador(nome_op):
     prefixo = nome_op.lower()
 
-    st.subheader(f"📋 Painel de Controle Comercial — {nome_op}")
-    st.caption(f"Arquivos e parâmetros específicos para a planilha de **{nome_op}**.")
+    col_tit1, col_tit2 = st.columns([3, 1])
+    with col_tit1:
+        st.subheader(f"📋 Painel de Controle Comercial — {nome_op}")
+        st.caption(f"Arquivos e parâmetros específicos para a planilha de **{nome_op}**.")
+    with col_tit2:
+        # Botão para limpar dados persistidos deste operador se necessário
+        if carregar_dados_operador(nome_op):
+            if st.button(f"🗑️ Limpar dados de {nome_op}", key=f"btn_limpar_{prefixo}", help=f"Apaga a planilha salva de {nome_op} no servidor para iniciar do zero"):
+                limpar_dados_operador(nome_op)
+                st.session_state[f'processado_{prefixo}'] = False
+                st.rerun()
 
     # --- SEÇÃO 1: UPLOAD DOS 6 CAMPOS ---
     st.markdown("#### 1. Arquivos de Entrada (Bases BI, Fortpel, ADM, Categorias e NFs)")
@@ -1381,7 +1442,7 @@ def renderizar_painel_operador(nome_op):
             st.warning("⚠️ Atenção: Por favor, selecione a data de início e a data de fim no calendário do período.")
         else:
             dt_inicio, dt_fim = data_sel
-            with st.spinner(f"⏳ Processando bases de {nome_op} e gerando tabelas da Roleta..."):
+            with st.spinner(f"⏳ Processando bases de {nome_op} e salvando de forma sincronizada no servidor..."):
                 try:
                     df_novos_raw = carregar_dados(file_novos)
                     df_reativados_raw = carregar_dados(file_reativados)
@@ -1546,52 +1607,68 @@ def renderizar_painel_operador(nome_op):
                     wb.save(buffer_download)
                     buffer_download.seek(0)
 
-                    # Salva no Session State sob o prefixo deste operador
+                    # ========================================================
+                    # PERSISTÊNCIA COMPARTILHADA EM DISCO
+                    # ========================================================
+                    dados_operador_disco = {
+                        'timestamp': datetime.datetime.now().strftime("%d/%m %H:%M"),
+                        'processado': True,
+                        'usando_ajustada': False,
+                        'df_aba1': df_aba1,
+                        'df_aba2': df_aba2,
+                        'df_top_notas': df_top_notas,
+                        'df_rank_cat': df_rank_cat,
+                        'total_geral_cat': total_geral_cat,
+                        'df_lideres_cat': df_lideres_cat,
+                        'df_categorias_raw': df_categorias_raw,
+                        'categoria_solicitada': categoria_solicitada,
+                        'df_fortpel': df_fortpel,
+                        'df_adm_raw': df_adm_raw,
+                        'col_f_ped': col_f_ped,
+                        'col_f_cli': col_f_cli,
+                        'col_f_vend': col_f_vend,
+                        'nome_aba1': nome_aba1,
+                        'nome_aba2': nome_aba2,
+                        'caminho_salvar_local': str(caminho_salvar_local),
+                        'buffer_bytes': buffer_download.getvalue(),
+                        'nome_arquivo_saida': nome_arquivo_saida,
+                        'mapeamento_colunas': {
+                            "BI Novos": f"Cliente: `{col_novos_cli}` | Valor: `{col_novos_val}`",
+                            "BI Reativados": f"Cliente: `{col_reat_cli}` | Valor: `{col_reat_val}`",
+                            "Acompanhamento Fortpel": f"Cliente: `{col_f_cli}` | Pedido: `{col_f_ped}` | Vendedor: `{col_f_vend}` | Valor: `{col_f_val}` | Data: `{col_f_data}`",
+                            "Planilha ADM": f"Vendedor: `{col_a_vend}` | Status: `{col_a_status}`",
+                            "NFs Faturadas (Campo 6)": "Ativo" if df_nf_raw is not None else "Não enviado (usando Fortpel)",
+                            "Categorias (Campo 5)": "Ativo" if df_categorias_raw is not None else "Não enviado"
+                        }
+                    }
+                    salvar_dados_operador(nome_op, dados_operador_disco)
+
                     st.session_state[f'processado_{prefixo}'] = True
                     st.session_state[f'fingerprint_{prefixo}'] = fingerprint_atual
-                    st.session_state[f'df_aba1_{prefixo}'] = df_aba1
-                    st.session_state[f'df_aba2_{prefixo}'] = df_aba2
-                    st.session_state[f'df_top_notas_{prefixo}'] = df_top_notas
-                    st.session_state[f'df_rank_cat_{prefixo}'] = df_rank_cat
-                    st.session_state[f'total_geral_cat_{prefixo}'] = total_geral_cat
-                    st.session_state[f'df_lideres_cat_{prefixo}'] = df_lideres_cat
-                    st.session_state[f'df_categorias_raw_{prefixo}'] = df_categorias_raw
-                    st.session_state[f'df_fortpel_{prefixo}'] = df_fortpel
-                    st.session_state[f'df_adm_raw_{prefixo}'] = df_adm_raw
-                    st.session_state[f'categoria_solicitada_{prefixo}'] = categoria_solicitada
-                    st.session_state[f'col_f_ped_{prefixo}'] = col_f_ped
-                    st.session_state[f'col_f_cli_{prefixo}'] = col_f_cli
-                    st.session_state[f'col_f_vend_{prefixo}'] = col_f_vend
-                    st.session_state[f'nome_aba1_{prefixo}'] = nome_aba1
-                    st.session_state[f'nome_aba2_{prefixo}'] = nome_aba2
-                    st.session_state[f'caminho_salvar_local_{prefixo}'] = caminho_salvar_local
-                    st.session_state[f'buffer_bytes_{prefixo}'] = buffer_download.getvalue()
-                    st.session_state[f'nome_arquivo_saida_{prefixo}'] = nome_arquivo_saida
-                    st.session_state[f'mapeamento_colunas_{prefixo}'] = {
-                        "BI Novos": f"Cliente: `{col_novos_cli}` | Valor: `{col_novos_val}`",
-                        "BI Reativados": f"Cliente: `{col_reat_cli}` | Valor: `{col_reat_val}`",
-                        "Acompanhamento Fortpel": f"Cliente: `{col_f_cli}` | Pedido: `{col_f_ped}` | Vendedor: `{col_f_vend}` | Valor: `{col_f_val}` | Data: `{col_f_data}`",
-                        "Planilha ADM": f"Vendedor: `{col_a_vend}` | Status: `{col_a_status}`",
-                        "NFs Faturadas (Campo 6)": "Ativo" if df_nf_raw is not None else "Não enviado (usando Fortpel)",
-                        "Categorias (Campo 5)": "Ativo" if df_categorias_raw is not None else "Não enviado"
-                    }
+                    st.session_state[f'dados_disco_{prefixo}'] = dados_operador_disco
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"❌ Ocorreu um erro ao processar as planilhas de {nome_op}: {e}")
                     st.session_state[f'processado_{prefixo}'] = False
 
-    # --- SEÇÃO 5: EXIBIÇÃO DOS RESULTADOS DESTE OPERADOR ---
-    if st.session_state.get(f'processado_{prefixo}', False):
-        df_aba1_s = st.session_state[f'df_aba1_{prefixo}']
-        df_aba2_s = st.session_state[f'df_aba2_{prefixo}']
-        nome_aba1_s = st.session_state[f'nome_aba1_{prefixo}']
-        nome_aba2_s = st.session_state[f'nome_aba2_{prefixo}']
-        caminho_local_s = st.session_state[f'caminho_salvar_local_{prefixo}']
-        buffer_bytes_s = st.session_state[f'buffer_bytes_{prefixo}']
-        nome_saida_s = st.session_state[f'nome_arquivo_saida_{prefixo}']
+    # --- SEÇÃO 5: EXIBIÇÃO DOS RESULTADOS (SINCRONIZADO DO DISCO) ---
+    dados_salvos_op = carregar_dados_operador(nome_op)
+    if dados_salvos_op and dados_salvos_op.get('processado', False):
+        df_aba1_s = dados_salvos_op['df_aba1']
+        df_aba2_s = dados_salvos_op['df_aba2']
+        nome_aba1_s = dados_salvos_op.get('nome_aba1', 'Reativados - Novos')
+        nome_aba2_s = dados_salvos_op.get('nome_aba2', 'Propostas Enviadas')
+        caminho_local_s = dados_salvos_op.get('caminho_salvar_local', '')
+        buffer_bytes_s = dados_salvos_op.get('buffer_bytes')
+        nome_saida_s = dados_salvos_op.get('nome_arquivo_saida', f"Controle_{nome_op}.xlsx")
+        col_ped_s = dados_salvos_op.get('col_f_ped', 'Pedido')
+        col_cli_s = dados_salvos_op.get('col_f_cli', 'Cliente')
+        ts_op = dados_salvos_op.get('timestamp', '')
 
-        st.success(f"✅ Tabelas de {nome_op} processadas e consolidadas com sucesso!")
-        st.info(f"📁 Arquivo Excel salvo em: `{caminho_local_s}`")
+        st.success(f"✅ Planilha de {nome_op} sincronizada no servidor! (Última geração: {ts_op})")
+        if caminho_local_s:
+            st.info(f"📁 Arquivo Excel salvo em: `{caminho_local_s}`")
 
         abas_titulos = [
             f"Aba 1: {nome_aba1_s}",
@@ -1601,32 +1678,34 @@ def renderizar_painel_operador(nome_op):
         abas_res = st.tabs(abas_titulos)
 
         with abas_res[0]:
-            if not df_aba1_s.empty:
+            if df_aba1_s is not None and not df_aba1_s.empty:
                 qtd_duas_compras = int(df_aba1_s['TEM_DUAS_COMPRAS'].sum()) if 'TEM_DUAS_COMPRAS' in df_aba1_s else 0
                 if qtd_duas_compras > 0:
                     st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
-                st.dataframe(df_aba1_s[['VENDEDOR_CLEAN', st.session_state[f'col_f_ped_{prefixo}'], st.session_state[f'col_f_cli_{prefixo}'], 'VALOR_NUM', 'STATUS', '__DATA_DT', 'BRINDE ROLETA']], use_container_width=True)
+
+                cols_show = [c for c in ['VENDEDOR_CLEAN', 'Vendedor', col_ped_s, 'Pedido', col_cli_s, 'Cliente', 'VALOR_NUM', 'STATUS', 'Status', '__DATA_DT', 'BRINDE ROLETA'] if c in df_aba1_s.columns]
+                st.dataframe(df_aba1_s[cols_show], use_container_width=True)
             else:
                 st.write(f"Sem registros no período para a Aba 1 ({nome_op}).")
 
         with abas_res[1]:
-            if not df_aba2_s.empty:
+            if df_aba2_s is not None and not df_aba2_s.empty:
                 st.dataframe(df_aba2_s, use_container_width=True)
                 st.metric("Total de Propostas Efetivadas", int(df_aba2_s['Qtd'].sum()))
             else:
                 st.write(f"Sem registros na planilha ADM ({nome_op}).")
 
         with abas_res[2]:
-            df_top_notas_s = st.session_state.get(f'df_top_notas_{prefixo}', pd.DataFrame())
-            df_cat_raw_s = st.session_state.get(f'df_categorias_raw_{prefixo}')
-            df_fort_s = st.session_state.get(f'df_fortpel_{prefixo}')
-            df_adm_s = st.session_state.get(f'df_adm_raw_{prefixo}')
-            cat_padrao = st.session_state.get(f'categoria_solicitada_{prefixo}', 'HIGIENE E LIMPEZA')
+            df_top_notas_s = dados_salvos_op.get('df_top_notas', pd.DataFrame())
+            df_cat_raw_s = dados_salvos_op.get('df_categorias_raw')
+            df_fort_s = dados_salvos_op.get('df_fortpel')
+            df_adm_s = dados_salvos_op.get('df_adm_raw')
+            cat_padrao = dados_salvos_op.get('categoria_solicitada', 'HIGIENE E LIMPEZA')
 
             st.markdown(f"### 🏆 Maior Venda em Nota Única — {nome_op}")
             st.caption("Calculado a partir da análise das NFs faturadas no período (Campo 6 ou base Fortpel).")
 
-            if not df_top_notas_s.empty:
+            if df_top_notas_s is not None and not df_top_notas_s.empty:
                 top1_nota = df_top_notas_s.iloc[0]
                 nota_formatada = int(top1_nota['Nota']) if isinstance(top1_nota['Nota'], (int, float)) and top1_nota['Nota'] == int(top1_nota['Nota']) else str(top1_nota['Nota'])
                 val_formatado = f"R$ {top1_nota['Valor_Total']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
@@ -1695,16 +1774,17 @@ def renderizar_painel_operador(nome_op):
                 st.info(f"ℹ️ Para consultar os vendedores líderes por categoria, faça o upload da Planilha de Categorias do BI no Campo 5 ({nome_op}).")
 
         with st.expander(f"🔍 Mapeamento das Colunas Identificadas ({nome_op})"):
-            for base, det in st.session_state.get(f'mapeamento_colunas_{prefixo}', {}).items():
+            for base, det in dados_salvos_op.get('mapeamento_colunas', {}).items():
                 st.markdown(f"- **{base}**: {det}")
 
-        st.download_button(
-            label=f"📥 Baixar Planilha Consolidada de {nome_op} (.xlsx)",
-            data=buffer_bytes_s,
-            file_name=nome_saida_s,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_btn_{prefixo}"
-        )
+        if buffer_bytes_s:
+            st.download_button(
+                label=f"📥 Baixar Planilha Consolidada de {nome_op} (.xlsx)",
+                data=buffer_bytes_s,
+                file_name=nome_saida_s,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_btn_{prefixo}"
+            )
 
     else:
         st.info(f"👆 Selecione ou envie as planilhas nos campos acima para **{nome_op}**, configure o período comercial e clique no botão **'🚀 Gerar Planilha de {nome_op}'** para iniciar o processamento.")
