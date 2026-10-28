@@ -1940,15 +1940,62 @@ def renderizar_painel_operador(nome_op):
                 if qtd_duas_compras > 0:
                     st.warning(f"⚠️ {qtd_duas_compras} cliente(s) com mais de uma compra no mesmo mês identificado(s) (destacados com 'DUAS COMPRAS' e linha em vermelho na planilha)!")
 
-                cols_show = [c for c in ['VENDEDOR_CLEAN', 'Vendedor', col_ped_s, 'Pedido', col_cli_s, 'Cliente', 'VALOR_NUM', 'STATUS', 'Status', '__DATA_DT', 'BRINDE ROLETA'] if c in df_aba1_s.columns]
-                st.dataframe(df_aba1_s[cols_show], use_container_width=True)
+                df_aba1_disp = pd.DataFrame()
+
+                # Vendedor
+                col_v = identificar_coluna(df_aba1_s.columns, ['vendedor_clean', 'vendedor', 'operador'])
+                if col_v:
+                    df_aba1_disp['Vendedor'] = df_aba1_s[col_v].astype(str).str.strip().str.upper()
+
+                # Pedido
+                col_p = col_ped_s if (col_ped_s and col_ped_s in df_aba1_s.columns) else identificar_coluna(df_aba1_s.columns, ['pedido', 'nota', 'documento'])
+                if col_p and col_p in df_aba1_s.columns:
+                    df_aba1_disp['Pedido'] = df_aba1_s[col_p].astype(str)
+
+                # Cliente
+                col_c = col_cli_s if (col_cli_s and col_cli_s in df_aba1_s.columns) else identificar_coluna(df_aba1_s.columns, ['cliente', 'razao', 'nome'])
+                if col_c and col_c in df_aba1_s.columns:
+                    df_aba1_disp['Cliente'] = df_aba1_s[col_c].astype(str).str.strip().str.upper()
+
+                # Valor
+                col_vl = identificar_coluna(df_aba1_s.columns, ['valor_num', 'valor', 'total'])
+                if col_vl:
+                    df_aba1_disp['Valor'] = df_aba1_s[col_vl].apply(limpar_valor).apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+
+                # Status
+                col_st = identificar_coluna(df_aba1_s.columns, ['status', 'status_clean'])
+                if col_st:
+                    df_aba1_disp['Status'] = df_aba1_s[col_st].astype(str).str.strip().str.upper()
+
+                # Data
+                if '__DATA_DT' in df_aba1_s.columns and pd.api.types.is_datetime64_any_dtype(df_aba1_s['__DATA_DT']):
+                    df_aba1_disp['Data'] = df_aba1_s['__DATA_DT'].dt.strftime('%d/%m/%Y').fillna('')
+                else:
+                    col_dt = identificar_coluna(df_aba1_s.columns, ['data', 'dt'])
+                    if col_dt and col_dt in df_aba1_s.columns:
+                        df_aba1_disp['Data'] = df_aba1_s[col_dt].astype(str)
+
+                # Brinde Roleta
+                if 'BRINDE ROLETA' in df_aba1_s.columns:
+                    df_aba1_disp['Brinde Roleta'] = df_aba1_s['BRINDE ROLETA'].fillna('')
+                elif 'TEM_DUAS_COMPRAS' in df_aba1_s.columns:
+                    df_aba1_disp['Brinde Roleta'] = df_aba1_s['TEM_DUAS_COMPRAS'].apply(lambda x: "DUAS COMPRAS" if x else "")
+
+                if df_aba1_disp.empty:
+                    cols_unicas = list(dict.fromkeys(df_aba1_s.columns))
+                    df_aba1_disp = df_aba1_s[cols_unicas].copy()
+
+                # Garante que não haja colunas duplicadas
+                df_aba1_disp = df_aba1_disp.loc[:, ~df_aba1_disp.columns.duplicated()]
+                st.dataframe(df_aba1_disp, use_container_width=True)
             else:
                 st.write(f"Sem registros no período para a Aba 1 ({nome_op}).")
 
         with abas_res[1]:
             if df_aba2_s is not None and not df_aba2_s.empty:
-                st.dataframe(df_aba2_s, use_container_width=True)
-                st.metric("Total de Propostas Efetivadas", int(df_aba2_s['Qtd'].sum()))
+                df_aba2_disp = df_aba2_s.loc[:, ~df_aba2_s.columns.duplicated()].copy()
+                st.dataframe(df_aba2_disp, use_container_width=True)
+                st.metric("Total de Propostas Efetivadas", int(df_aba2_disp['Qtd'].sum()) if 'Qtd' in df_aba2_disp else 0)
             else:
                 st.write(f"Sem registros na planilha ADM ({nome_op}).")
 
@@ -1976,7 +2023,7 @@ def renderizar_painel_operador(nome_op):
                     st.metric("Valor Total da Nota", val_formatado)
 
                 with st.expander("📋 Ver Ranking Completo das Maiores Vendas em Nota Única"):
-                    df_notas_disp = df_top_notas_s.copy()
+                    df_notas_disp = df_top_notas_s.loc[:, ~df_top_notas_s.columns.duplicated()].copy()
                     df_notas_disp['Valor_Total'] = df_notas_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                     st.dataframe(df_notas_disp, use_container_width=True)
             else:
@@ -2017,13 +2064,13 @@ def renderizar_painel_operador(nome_op):
                         st.metric(f"Total Geral ({cat_escolhida})", total_geral_fmt)
 
                     st.markdown(f"**Ranking de Vendedores na categoria `{cat_escolhida}`:**")
-                    df_cat_disp = df_rank_escolhido.copy()
+                    df_cat_disp = df_rank_escolhido.loc[:, ~df_rank_escolhido.columns.duplicated()].copy()
                     df_cat_disp['Total_Vendido'] = df_cat_disp['Total_Vendido'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                     st.dataframe(df_cat_disp, use_container_width=True)
 
                 if not df_lideres_todas.empty:
                     with st.expander("📊 Ver Tabela Geral de Líderes das 7 Categorias"):
-                        df_lid_disp = df_lideres_todas.copy()
+                        df_lid_disp = df_lideres_todas.loc[:, ~df_lideres_todas.columns.duplicated()].copy()
                         df_lid_disp['Valor_Total'] = df_lid_disp['Valor_Total'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                         df_lid_disp['Total_Categoria'] = df_lid_disp['Total_Categoria'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                         st.dataframe(df_lid_disp, use_container_width=True)
