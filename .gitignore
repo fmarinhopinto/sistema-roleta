@@ -8,6 +8,8 @@ arquivos_entrada/*
 !arquivos_entrada/.gitkeep
 planilhas_geradas/*
 !planilhas_geradas/.gitkeep
+dados_compartilhados/*
+!dados_compartilhados/.gitkeep
 
 # Python cache
 __pycache__/

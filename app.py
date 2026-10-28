@@ -5,6 +5,7 @@ import unicodedata
 import datetime
 import time
 import zoneinfo
+import json
 import pickle
 from pathlib import Path
 import streamlit as st
@@ -128,6 +129,147 @@ def limpar_dados_operador(nome_op):
             arquivo_pkl.unlink()
         except Exception:
             pass
+
+# --- CONFIGURAÇÃO E EXTRAÇÃO DO PERÍODO DE VIGÊNCIA DA CAMPANHA ---
+def carregar_config_campanha():
+    """Carrega as configurações compartilhadas da campanha (como o período de vigência)."""
+    caminho = PASTA_STORAGE / "config_campanha.json"
+    if caminho.exists():
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def salvar_config_campanha(cfg_dict):
+    """Salva configurações compartilhadas da campanha no servidor para ambos os operadores."""
+    caminho = PASTA_STORAGE / "config_campanha.json"
+    try:
+        atual = carregar_config_campanha()
+        atual.update(cfg_dict)
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(atual, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Erro ao salvar config da campanha: {e}")
+
+def extrair_periodo_de_texto(texto, ano_ref=None):
+    """Extrai intervalo de datas de strings (ex: '1408_a_2710' ou '14/08/2026 a 27/10/2026')."""
+    if not texto:
+        return None
+    t = str(texto).strip()
+    if not ano_ref:
+        ano_ref = obter_agora_brasil().year
+
+    # 1. Padrão no nome dos arquivos: 1408_a_2710 ou 0710_a_0910
+    m1 = re.search(r'(\d{2})(\d{2})\s*(?:_a_|a|-)\s*(\d{2})(\d{2})', t)
+    if m1:
+        d1, m1_m, d2, m2_m = m1.groups()
+        return f"{d1}/{m1_m}/{ano_ref} a {d2}/{m2_m}/{ano_ref}"
+
+    # 2. Padrão de datas completas: DD/MM/AAAA a DD/MM/AAAA
+    m2 = re.search(r'(\d{2}[\/\.-]\d{2}[\/\.-]\d{2,4})\s*(?:a|-|ate)\s*(\d{2}[\/\.-]\d{2}[\/\.-]\d{2,4})', t, re.I)
+    if m2:
+        p1 = m2.group(1).replace('-', '/').replace('.', '/')
+        p2 = m2.group(2).replace('-', '/').replace('.', '/')
+        return f"{p1} a {p2}"
+
+    # 3. Padrão DD/MM a DD/MM
+    m3 = re.search(r'(\d{2}[\/\.-]\d{2})\s*(?:a|-|ate)\s*(\d{2}[\/\.-]\d{2})', t, re.I)
+    if m3:
+        p1 = m3.group(1).replace('-', '/').replace('.', '/')
+        p2 = m3.group(2).replace('-', '/').replace('.', '/')
+        return f"{p1}/{ano_ref} a {p2}/{ano_ref}"
+
+    return None
+
+def extrair_periodo_de_planilha(caminho_ou_arquivo):
+    """Tenta extrair período do cabeçalho, abas ou coluna DATA de um arquivo Excel."""
+    try:
+        nome = getattr(caminho_ou_arquivo, 'name', str(caminho_ou_arquivo))
+        p_nome = extrair_periodo_de_texto(nome)
+        if p_nome:
+            return p_nome
+
+        xl = pd.ExcelFile(caminho_ou_arquivo)
+        for s in xl.sheet_names:
+            p_s = extrair_periodo_de_texto(s)
+            if p_s:
+                return p_s
+            try:
+                df = pd.read_excel(caminho_ou_arquivo, sheet_name=s)
+                col_d = identificar_coluna(df.columns, ['data', 'dt'])
+                if col_d:
+                    s_dt = pd.to_datetime(df[col_d], dayfirst=True, errors='coerce').dropna()
+                    if not s_dt.empty:
+                        d1 = s_dt.min().strftime('%d/%m/%Y')
+                        d2 = s_dt.max().strftime('%d/%m/%Y')
+                        return f"{d1} a {d2}"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+def obter_periodo_vigencia_campanha(disco_fra=None, disco_fil=None, df1_comb=None):
+    """
+    Retorna o período de vigência da campanha consultando:
+    1. Configuração salva na nuvem (definida/confirmada pelo usuário)
+    2. Períodos explícitos salvos pelos operadores na geração de relatórios
+    3. Nome das planilhas ajustadas ou geradas (ex: 1408_a_2710)
+    4. Planilhas salvas no disco compartilhado (francine_ajustada.xlsx / filipe_ajustada.xlsx)
+    5. Menor e maior data presente na coluna DATA do cruzamento unificado (df1_comb)
+    """
+    # 1. Configuração salva
+    cfg = carregar_config_campanha()
+    if cfg.get('periodo_vigencia'):
+        return cfg['periodo_vigencia']
+
+    # 2. Período gravado nos dicionários dos operadores
+    per_fra = disco_fra.get('periodo') if disco_fra else None
+    per_fil = disco_fil.get('periodo') if disco_fil else None
+    if per_fra and per_fil:
+        return per_fra if per_fra == per_fil else f"{per_fra} / {per_fil}"
+    if per_fra:
+        return per_fra
+    if per_fil:
+        return per_fil
+
+    # 3. Nomes de arquivos
+    candidatos_nomes = []
+    for d in [disco_fra, disco_fil]:
+        if d:
+            if d.get('nome_arquivo_ajustada'):
+                candidatos_nomes.append(d['nome_arquivo_ajustada'])
+            if d.get('nome_arquivo_saida'):
+                candidatos_nomes.append(d['nome_arquivo_saida'])
+            if d.get('caminho_salvar_local'):
+                candidatos_nomes.append(Path(d['caminho_salvar_local']).name)
+            if d.get('nome_aba1'):
+                candidatos_nomes.append(d['nome_aba1'])
+
+    for n in candidatos_nomes:
+        p = extrair_periodo_de_texto(n)
+        if p:
+            return p
+
+    # 4. Arquivos ajustados no disco compartilhado
+    for nome_arq in ["filipe_ajustada.xlsx", "francine_ajustada.xlsx"]:
+        caminho_aj = PASTA_STORAGE / nome_arq
+        if caminho_aj.exists():
+            p = extrair_periodo_de_planilha(caminho_aj)
+            if p:
+                return p
+
+    # 5. Coluna DATA no dataframe consolidado
+    if df1_comb is not None and not df1_comb.empty and 'DATA' in df1_comb.columns:
+        s_dt = pd.to_datetime(df1_comb['DATA'], dayfirst=True, errors='coerce').dropna()
+        if not s_dt.empty:
+            d_min = s_dt.min().strftime('%d/%m/%Y')
+            d_max = s_dt.max().strftime('%d/%m/%Y')
+            return f"{d_min} a {d_max}"
+
+    return "Não informado"
 
 # --- FUNÇÕES DE SUPORTE ---
 def normalizar_texto(texto):
@@ -677,6 +819,7 @@ def carregar_planilha_ajustada(arquivo):
         col_vl = identificar_coluna(df1.columns, ['valor', 'total'])
         col_st = identificar_coluna(df1.columns, ['status'])
         col_p = identificar_coluna(df1.columns, ['pedido', 'nota'])
+        col_d = identificar_coluna(df1.columns, ['data', 'dt'])
 
         df1_clean = pd.DataFrame()
         if col_v: df1_clean['Vendedor'] = df1[col_v].astype(str).str.strip().str.upper()
@@ -684,8 +827,18 @@ def carregar_planilha_ajustada(arquivo):
         if col_vl: df1_clean['VALOR_NUM'] = df1[col_vl].apply(limpar_valor)
         if col_st: df1_clean['Status'] = df1[col_st].astype(str).str.strip().str.upper()
         if col_p: df1_clean['Pedido'] = df1[col_p]
+        if col_d: df1_clean['DATA'] = pd.to_datetime(df1[col_d], dayfirst=True, errors='coerce')
         res['df_aba1'] = df1_clean
         res['nome_aba1'] = s1
+
+        # Tenta extrair período de vigência
+        nome_arq = getattr(arquivo, 'name', str(arquivo))
+        p_extraido = extrair_periodo_de_texto(nome_arq) or (extrair_periodo_de_texto(s1) if s1 else None)
+        if not p_extraido and 'DATA' in df1_clean.columns:
+            s_dt = df1_clean['DATA'].dropna()
+            if not s_dt.empty:
+                p_extraido = f"{s_dt.min().strftime('%d/%m/%Y')} a {s_dt.max().strftime('%d/%m/%Y')}"
+        res['periodo'] = p_extraido
 
     # 2. ABA 2: PROPOSTAS ENVIADAS
     s2 = None
@@ -784,6 +937,7 @@ def padronizar_df_aba1(df):
     col_val = identificar_coluna(df_c.columns, ["valor_num", "valor", "total"])
     col_ped = identificar_coluna(df_c.columns, ["pedido", "nota"])
     col_st = identificar_coluna(df_c.columns, ["status", "status_clean"])
+    col_d = identificar_coluna(df_c.columns, ["__data_dt", "data", "dt"])
 
     res = pd.DataFrame()
     if col_v: res['Vendedor'] = df_c[col_v].astype(str).str.strip().str.upper()
@@ -791,6 +945,7 @@ def padronizar_df_aba1(df):
     if col_val: res['VALOR_NUM'] = df_c[col_val].apply(limpar_valor)
     if col_ped: res['Pedido'] = df_c[col_ped]
     if col_st: res['Status'] = df_c[col_st].astype(str).str.strip().str.upper()
+    if col_d: res['DATA'] = pd.to_datetime(df_c[col_d], dayfirst=True, errors='coerce')
     return res
 
 def padronizar_df_aba2(df):
@@ -805,9 +960,10 @@ def padronizar_df_aba2(df):
         res['Qtd'] = pd.to_numeric(df_c[col_q], errors='coerce').fillna(0).astype(int)
     return res
 
-def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
+def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome, periodo_campanha=""):
     wb = openpyxl.Workbook()
     fonte_titulo = Font(name="Calibri", size=13, bold=True, color="1F4E79")
+    fonte_subtitulo = Font(name="Calibri", size=10, italic=True, color="595959")
     fonte_cabecalho = Font(name="Calibri", size=11, bold=True, color="000000")
     fill_cab_azul = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     fill_cab_amarelo = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
@@ -823,6 +979,8 @@ def gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_nome):
     ws0 = wb.active
     ws0.title = "🏆 Campeões Roleta"
     ws0.cell(row=1, column=1, value="🏆 RESULTADOS FINAIS DA ROLETA COMERCIAL").font = fonte_titulo
+    if periodo_campanha:
+        ws0.cell(row=2, column=1, value=f"Período de Vigência da Campanha: {periodo_campanha}").font = fonte_subtitulo
 
     headers_podio = ["RANKING", "CRITÉRIO DE PREMIAÇÃO", "VENDEDOR CAMPEÃO", "RESULTADO / MÉTRICA"]
     for idx, h in enumerate(headers_podio, 1):
@@ -991,6 +1149,7 @@ def modal_upload_ajustada():
                 df_cats_fra = dados_fra.get('df_cats', pd.DataFrame())
 
                 # Atualiza objeto de persistência
+                p_fra = dados_fra.get('periodo') or extrair_periodo_de_texto(file_fra.name)
                 existente_fra = carregar_dados_operador("FRANCINE") or {}
                 existente_fra.update({
                     'timestamp': obter_timestamp_formatado_brasil(),
@@ -1002,9 +1161,12 @@ def modal_upload_ajustada():
                     'df_top_notas': df_top_fra,
                     'df_cats': df_cats_fra,
                     'df_lideres_cat': df_cats_fra,
-                    'nome_arquivo_ajustada': file_fra.name
+                    'nome_arquivo_ajustada': file_fra.name,
+                    'periodo': p_fra or existente_fra.get('periodo')
                 })
                 salvar_dados_operador("FRANCINE", existente_fra)
+                if p_fra:
+                    salvar_config_campanha({'periodo_vigencia': p_fra})
                 st.session_state['df_aba1_francine_ajustada'] = dados_fra['df_aba1']
                 st.session_state['df_aba2_francine_ajustada'] = dados_fra.get('df_aba2', pd.DataFrame())
                 st.session_state['df_top_francine_ajustada'] = df_top_fra
@@ -1035,6 +1197,7 @@ def modal_upload_ajustada():
                 df_top_fil = dados_fil.get('df_top_notas', pd.DataFrame())
                 df_cats_fil = dados_fil.get('df_cats', pd.DataFrame())
 
+                p_fil = dados_fil.get('periodo') or extrair_periodo_de_texto(file_fil.name)
                 existente_fil = carregar_dados_operador("FILIPE") or {}
                 existente_fil.update({
                     'timestamp': obter_timestamp_formatado_brasil(),
@@ -1046,9 +1209,12 @@ def modal_upload_ajustada():
                     'df_top_notas': df_top_fil,
                     'df_cats': df_cats_fil,
                     'df_lideres_cat': df_cats_fil,
-                    'nome_arquivo_ajustada': file_fil.name
+                    'nome_arquivo_ajustada': file_fil.name,
+                    'periodo': p_fil or existente_fil.get('periodo')
                 })
                 salvar_dados_operador("FILIPE", existente_fil)
+                if p_fil:
+                    salvar_config_campanha({'periodo_vigencia': p_fil})
                 st.session_state['df_aba1_filipe_ajustada'] = dados_fil['df_aba1']
                 st.session_state['df_aba2_filipe_ajustada'] = dados_fil.get('df_aba2', pd.DataFrame())
                 st.session_state['df_top_filipe_ajustada'] = df_top_fil
@@ -1176,12 +1342,36 @@ def modal_resultados_finais():
     ts_fil_txt = disco_fil.get('timestamp', '')
     info_fra = f"📝 Ajustada ({ts_fra_txt})" if fra_usando_ajustada else (f"✅ Gerada ({ts_fra_txt})" if tem_dados_fra else "⚪ Sem dados")
     info_fil = f"📝 Ajustada ({ts_fil_txt})" if fil_usando_ajustada else (f"✅ Gerada ({ts_fil_txt})" if tem_dados_fil else "⚪ Sem dados")
-    st.info(f"📊 **Bases sincronizadas:** Francine (**{info_fra}**) | Filipe (**{info_fil}**)")
-
     # 1. MAIOR NÚMERO DE CLIENTES NOVOS / REATIVADOS
     p_df1_fra = padronizar_df_aba1(df1_fra)
     p_df1_fil = padronizar_df_aba1(df1_fil)
     df1_comb = pd.concat([p_df1_fra, p_df1_fil], ignore_index=True)
+
+    # Determina o período de vigência da campanha (sincronizado, metadados ou automático)
+    periodo_vigencia = obter_periodo_vigencia_campanha(disco_fra, disco_fil, df1_comb)
+
+    st.info(
+        f"📊 **Bases sincronizadas:** Francine (**{info_fra}**) | Filipe (**{info_fil}**)\n\n"
+        f"📅 **Período de Vigência da Campanha:** **{periodo_vigencia}**"
+    )
+
+    with st.expander("✏️ Ajustar / Confirmar Período de Vigência da Campanha", expanded=False):
+        c_ed1, c_ed2 = st.columns([3, 1])
+        with c_ed1:
+            val_atual = "" if periodo_vigencia == "Não informado" else periodo_vigencia
+            novo_periodo = st.text_input(
+                "Período de Vigência da Campanha:",
+                value=val_atual,
+                placeholder="Ex: 14/08/2026 a 27/10/2026",
+                key="input_periodo_vigencia_modal",
+                label_visibility="collapsed"
+            )
+        with c_ed2:
+            if st.button("💾 Salvar Período", key="btn_salvar_periodo_modal", use_container_width=True, type="primary"):
+                if novo_periodo.strip():
+                    salvar_config_campanha({"periodo_vigencia": novo_periodo.strip()})
+                    st.success("Período de vigência salvo com sucesso!")
+                    st.rerun()
 
     rank1 = pd.DataFrame()
     if not df1_comb.empty and 'Vendedor' in df1_comb.columns:
@@ -1469,7 +1659,7 @@ def modal_resultados_finais():
 
     st.markdown("---")
 
-    bytes_excel_final = gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_escolhida)
+    bytes_excel_final = gerar_excel_resultados_finais(rank1, rank2, rank3, rank4, cat_escolhida, periodo_vigencia)
     nome_arq_final = f"Resultados_Finais_Roleta_Consolidado_{obter_hoje_brasil().strftime('%d%m%Y')}.xlsx"
 
     col_exp1, col_exp2 = st.columns([2, 1])
@@ -1521,6 +1711,10 @@ with col_top_sel:
 with col_top_status:
     st.markdown("**Status dos Relatórios (Sincronizado):**")
     st.caption(f"FRANCINE: **{status_fra_txt}** | FILIPE: **{status_fil_txt}**")
+    cfg_main = carregar_config_campanha()
+    per_vig_main = cfg_main.get('periodo_vigencia') or obter_periodo_vigencia_campanha(dados_fra_disk, dados_fil_disk)
+    if per_vig_main and per_vig_main != "Não informado":
+        st.caption(f"📅 Vigência da Campanha: **{per_vig_main}**")
 with col_top_sync:
     st.write("")
     if st.button("🔄 Sincronizar", help="Atualiza e sincroniza as planilhas salvas por ambos os computadores", use_container_width=True):
@@ -1930,11 +2124,15 @@ def renderizar_painel_operador(nome_op):
                     # ========================================================
                     # PERSISTÊNCIA COMPARTILHADA EM DISCO
                     # ========================================================
+                    periodo_gerado = f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
                     dados_operador_disco = {
                         'timestamp': obter_timestamp_formatado_brasil(),
                         'tz_brasil': True,
                         'processado': True,
                         'usando_ajustada': False,
+                        'dt_inicio': dt_inicio,
+                        'dt_fim': dt_fim,
+                        'periodo': periodo_gerado,
                         'df_aba1': df_aba1,
                         'df_aba2': df_aba2,
                         'df_top_notas': df_top_notas,
@@ -1963,6 +2161,7 @@ def renderizar_painel_operador(nome_op):
                         }
                     }
                     salvar_dados_operador(nome_op, dados_operador_disco)
+                    salvar_config_campanha({'periodo_vigencia': periodo_gerado})
 
                     st.session_state[f'processado_{prefixo}'] = True
                     st.session_state[f'fingerprint_{prefixo}'] = fingerprint_atual
@@ -1987,7 +2186,9 @@ def renderizar_painel_operador(nome_op):
         col_cli_s = dados_salvos_op.get('col_f_cli', 'Cliente')
         ts_op = dados_salvos_op.get('timestamp', '')
 
-        st.success(f"✅ Planilha de {nome_op} sincronizada no servidor! (Última geração: {ts_op})")
+        periodo_salvo = dados_salvos_op.get('periodo', '')
+        info_per = f" | Vigência: {periodo_salvo}" if periodo_salvo else ""
+        st.success(f"✅ Planilha de {nome_op} sincronizada no servidor! (Última geração: {ts_op}{info_per})")
         if caminho_local_s:
             st.info(f"📁 Arquivo Excel salvo em: `{caminho_local_s}`")
 
